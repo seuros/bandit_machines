@@ -1,0 +1,59 @@
+module BanditMachines
+  VERSION: String
+  ARM_CAPACITY: Integer
+  TICKET_CAPACITY: Integer
+
+  type tie_break = :lowest_index | :highest_index | :least_tried | :draw
+  type reason = :cold_start | :explore | :exploit | :upper_bound
+  type select_refusal = :no_open_arm | :tickets_full | :exhausted
+  type ticket_refusal = :stale_ticket | :unknown_ticket
+
+  class Ticket
+    def arm: () -> Integer
+    def serial: () -> Integer
+    def generation: () -> Integer
+  end
+
+  class Selection < Data
+    attr_reader ticket: Ticket
+    attr_reader arm: Integer
+    attr_reader reason: reason
+    def self.new: (Ticket ticket, Integer arm, reason reason) -> Selection
+                | (ticket: Ticket, arm: Integer, reason: reason) -> Selection
+  end
+
+  class ArmStats < Data
+    attr_reader open: bool
+    attr_reader generation: Integer
+    attr_reader rewarded: Integer
+    attr_reader reward_sum: Integer
+    attr_reader pending: Integer
+    def self.new: (bool open, Integer generation, Integer rewarded, Integer reward_sum, Integer pending) -> ArmStats
+                | (open: bool, generation: Integer, rewarded: Integer, reward_sum: Integer, pending: Integer) -> ArmStats
+    def tries: () -> Integer
+  end
+
+  class Bandit
+    def self.new: (arms: Integer, max_reward: Integer, prior: Integer, ?tie_break: tie_break) -> Bandit
+    def select_ucb1: (?pick: Integer) -> (Selection | select_refusal)
+    def select_epsilon_greedy: (numerator: Integer, denominator: Integer, gate: Integer, pick: Integer) -> (Selection | select_refusal)
+    def reward: (Ticket ticket, Integer reward) -> (true | ticket_refusal | :reward_out_of_range | :saturated)
+    def abandon: (Ticket ticket) -> (true | ticket_refusal)
+    def revoke_before: (Integer serial) -> Integer
+    def reset: (Integer arm) -> (Integer | :exhausted)
+    def reset_all: () -> (Integer | :exhausted)
+    def decay: (Integer arm, numerator: Integer, denominator: Integer) -> true
+    def decay_all: (numerator: Integer, denominator: Integer) -> true
+    def open: (Integer arm) -> bool
+    def close: (Integer arm) -> bool
+    def stats: (Integer arm) -> ArmStats
+    def ucb1_index_q56: (Integer arm) -> Integer?
+    def outstanding: () -> Integer
+    def next_serial: () -> Integer
+    def max_reward: () -> Integer
+    def prior: () -> Integer
+    def tie_break: () -> tie_break
+    def arm_capacity: () -> Integer
+    def ticket_capacity: () -> Integer
+  end
+end
