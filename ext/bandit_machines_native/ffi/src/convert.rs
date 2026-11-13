@@ -37,6 +37,17 @@ impl TryConvert for Small {
     }
 }
 
+/// An issuer scope: an Integer in `0..=65535`.
+#[derive(Clone, Copy)]
+pub struct Scope(pub u16);
+
+impl TryConvert for Scope {
+    fn try_convert(value: Value) -> Result<Self, Error> {
+        integer(value)?;
+        u16::try_convert(value).map(Self)
+    }
+}
+
 /// An arm index: any Integer that fits `usize`. Whether it names an arm is
 /// the core's to answer (`Refusal::UnknownArm`, or `None` from a query).
 #[derive(Clone, Copy)]

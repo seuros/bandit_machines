@@ -38,6 +38,14 @@ assert_eq!((second.arm(), second.reason), (1, Reason::ColdStart));
 // The arm is reset while its reward is still in flight: the reward is refused.
 bandit.reset(1)?;
 assert_eq!(bandit.reward(second.ticket, 100), Err(Refusal::StaleTicket));
+
+// Another bandit, another scope: it refuses a ticket it did not issue.
+let mut other = Bandit::<4, 16>::with_scope(config, 7);
+other.open(0)?;
+let theirs = other.select_ucb1(0)?.ticket;
+assert_eq!((theirs.scope(), bandit.scope()), (7, 0));
+assert_eq!(bandit.reward(theirs, 1), Err(Refusal::UnknownTicket));
+assert_eq!(other.reward(theirs, 1), Ok(()));
 # Ok::<(), Refusal>(())
 ```
 
@@ -88,7 +96,31 @@ arm's generation and a serial. A ticket is redeemed once, by `reward` or
 reward answers `StaleTicket`; a spent, revoked or foreign ticket answers
 `UnknownTicket`. `revoke_before(serial)` abandons everything issued before a
 serial, which is how a caller with its own clock expires selections that will
-never report. Tickets are scoped to one bandit value and are not a wire format.
+never report. `revoke_all()` abandons every outstanding ticket and cannot
+refuse; no serial does that (`u64::MAX` is another scope's, and the last
+serial of a scope can itself be outstanding). Unlike `reset_all` it keeps
+every arm's statistics and generation. `next_serial` is the serial the next ticket will carry, `None`
+once the scope is spent. Tickets are not a wire format.
+
+**Scopes.** A ticket is only meaningful to the bandit that issued it. Serials
+come from a `periscope_machines::Issuer`: the bandit's scope in the top 16
+bits, a sequence counted from one below, never reissued.
+`Bandit::with_scope(config, scope)` chooses the scope and `new(config)` is
+scope zero; `Bandit::scope` and `Ticket::scope` read it. The scope is identity,
+not policy, so it is not in `Config`: replicas share a configuration and must
+not share a scope. `reward` and `abandon` answer `UnknownTicket` for a ticket
+the bandit did not issue, before looking at any arm or slot, and
+`revoke_before` answers it for a serial of another scope. Give each bandit its
+own scope: the core reads no clock and no random source, so it cannot pick one,
+and two bandits left in the same scope issue the same tickets.
+
+**Restarts.** A fresh bandit counts from one again, so a ticket that outlived a
+restart could redeem a new selection. Save `Bandit::issued` and rebuild with
+`Bandit::resumed(config, scope, issued)`, or give each incarnation a new scope.
+`resumed` restores only the serial sequence: every arm is closed with nothing
+observed, no ticket is outstanding, every earlier ticket is refused, and
+reopening arms and restoring what they learned is the caller's job. It is
+`None` when `issued` is beyond `periscope_machines::SEQUENCE_MAX`.
 
 **Nonstationarity.** Nothing ages on its own. `reset` / `reset_all` forget an
 arm and fence its late rewards. `decay` / `decay_all` discount history by a
@@ -96,7 +128,8 @@ arm and fence its late rewards. `decay` / `decay_all` discount history by a
 and generations untouched, so a late reward still lands at full weight.
 
 **Refusals.** Every refusal leaves the bandit unchanged. `TicketsFull` when all
-slots are out, `Exhausted` when serials or an arm's generations run out,
+slots are out, `Exhausted` when the scope's 2^48 - 1 serials or an arm's
+generations run out,
 `Saturated` when an arm's `u64` count or sum would overflow (decay, then retry
 the same ticket), `RewardOutOfRange` above `max_reward`.
 

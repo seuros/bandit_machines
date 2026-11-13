@@ -4,6 +4,8 @@ extern crate std;
 
 use std::vec::Vec;
 
+use periscope_machines::{scoped, sequence_of};
+
 use super::model::{Model, ModelTicket, explores};
 use crate::{
     Bandit, Closing, Config, Draws, Opening, Ratio, Reason, Refusal, Selection, Ticket, TieBreak,
@@ -36,19 +38,27 @@ struct Run {
     core: Bandit<ARMS, TICKETS>,
     model: Model,
     rng: Rng,
+    scope: u16,
     /// Every ticket ever issued, spent or not, so stale ones get replayed.
     issued: Vec<(Ticket, ModelTicket)>,
 }
 
 impl Run {
-    fn new(tie: TieBreak, seed: u64) -> Self {
+    fn new(tie: TieBreak, seed: u64, scope: u16) -> Self {
         let config = Config::new(MAX_REWARD, PRIOR, tie).unwrap();
         Self {
-            core: Bandit::new(config),
+            core: Bandit::with_scope(config, scope),
             model: Model::new(ARMS, TICKETS, MAX_REWARD, PRIOR, tie),
             rng: Rng(seed),
+            scope,
             issued: Vec::new(),
         }
+    }
+
+    /// A scope this bandit does not issue under.
+    fn foreign_scope(&mut self) -> u16 {
+        self.scope
+            .wrapping_add(1 + self.rng.below(u64::from(u16::MAX)) as u16)
     }
 
     fn assert_same_state(&self) {
@@ -63,7 +73,9 @@ impl Run {
             assert!(stats.reward_sum <= stats.rewarded * u64::from(MAX_REWARD));
         }
         assert_eq!(self.core.outstanding(), self.model.live.len());
-        assert_eq!(self.core.next_serial(), self.model.next_serial);
+        let next = scoped(self.scope, self.model.next_serial);
+        assert_eq!(self.core.next_serial(), Some(next));
+        assert_eq!(self.core.scope(), self.scope);
         assert!(self.core.stats(ARMS).is_none());
     }
 
@@ -71,7 +83,8 @@ impl Run {
         let selection = outcome.unwrap();
         assert_eq!((selection.arm(), selection.reason), (arm, reason));
         let ticket = self.model.issue(arm);
-        assert_eq!(selection.ticket.serial(), ticket.serial);
+        assert_eq!(selection.ticket.serial(), scoped(self.scope, ticket.serial));
+        assert_eq!(selection.ticket.scope(), self.scope);
         assert_eq!(selection.ticket.generation(), ticket.generation);
         self.issued.push((selection.ticket, ticket));
     }
@@ -139,8 +152,16 @@ impl Run {
             self.issued.len().min(TICKETS + 2)
         };
         let at = self.issued.len() - 1 - self.rng.below(span as u64) as usize;
-        let (ticket, shadow) = self.issued[at];
+        let (mut ticket, shadow) = self.issued[at];
         let before = self.core.clone();
+        if self.rng.below(6) == 0 {
+            // Same slot, arm, generation and sequence number, another scope.
+            ticket.serial = scoped(self.foreign_scope(), sequence_of(ticket.serial));
+            assert_eq!(self.core.reward(ticket, 1), Err(Refusal::UnknownTicket));
+            assert_eq!(self.core.abandon(ticket), Err(Refusal::UnknownTicket));
+            assert_eq!(self.core, before);
+            return;
+        }
         let (outcome, expected) = if self.rng.below(5) == 0 {
             (self.core.abandon(ticket), self.model.redeem(shadow, None))
         } else {
@@ -185,10 +206,21 @@ impl Run {
                 assert_eq!(self.core == before, expected == Closing::AlreadyClosed);
                 self.model.arms[arm].open = false;
             }
-            92..94 => {
+            92 => assert_eq!(self.core.revoke_all(), self.model.revoke_all()),
+            93 => {
                 let floor = self.rng.below(self.model.next_serial + 2);
+                let before = self.core.clone();
+                let foreign = scoped(self.foreign_scope(), floor);
+                assert_eq!(
+                    self.core.revoke_before(foreign),
+                    Err(Refusal::UnknownTicket)
+                );
+                assert_eq!(self.core, before);
                 let revoked = self.model.revoke_before(floor);
-                assert_eq!(self.core.revoke_before(floor), revoked);
+                assert_eq!(
+                    self.core.revoke_before(scoped(self.scope, floor)),
+                    Ok(revoked)
+                );
             }
             94..96 => assert_eq!(self.core.reset(arm), Ok(self.model.reset(arm))),
             96 => {
@@ -218,7 +250,9 @@ fn core_matches_the_naive_model_under_every_tie_rule() {
     ];
     for (offset, tie) in rules.into_iter().enumerate() {
         for seed in 1..=8_u64 {
-            let mut run = Run::new(tie, seed * 0x9E37_79B9 + offset as u64);
+            // Scope zero, and non-zero scopes up to the last one.
+            let scope = [0, 1, 0x4236, u16::MAX][(seed as usize + offset) % 4];
+            let mut run = Run::new(tie, seed * 0x9E37_79B9 + offset as u64, scope);
             for _ in 0..6_000 {
                 run.step();
             }

@@ -2,67 +2,89 @@
 mod convert;
 mod init;
 
-use std::{cell::RefCell, sync::Arc};
+use std::cell::RefCell;
 
 use bandit_machines::{Bandit as Core, Refusal, Selection, Ticket};
 use magnus::{Error, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
 
-use convert::{Arm, Number, Small, refusal};
+use convert::{Arm, Number, Scope, Small, refusal};
 
 const ARMS: usize = 16;
 const TICKETS: usize = 64;
 
+/// `BanditMachines::Ticket`: the core's `Ticket`. Its serial carries the
+/// scope of the bandit that issued it; the core refuses it anywhere else.
 #[magnus::wrap(class = "BanditMachines::Ticket", free_immediately, size)]
-struct Handle {
-    owner: Arc<()>,
-    ticket: Ticket,
-}
+struct Handle(Ticket);
 
 impl Handle {
     const fn arm(&self) -> usize {
-        self.ticket.arm()
+        self.0.arm()
     }
 
     const fn generation(&self) -> u64 {
-        self.ticket.generation()
+        self.0.generation()
     }
 
     const fn serial(&self) -> u64 {
-        self.ticket.serial()
+        self.0.serial()
+    }
+
+    const fn scope(&self) -> u16 {
+        self.0.scope()
     }
 }
 
 #[magnus::wrap(class = "BanditMachines::Bandit", free_immediately, size)]
 struct Bandit {
-    owner: Arc<()>,
     core: RefCell<Core<ARMS, TICKETS>>,
 }
 
 impl Bandit {
-    /// Every arm starts closed, as in the core.
+    /// Every arm starts closed, as in the core. Scope zero.
     fn new(ruby: &Ruby, config: Value) -> Result<Self, Error> {
         let config = convert::config(ruby, config)?;
         Ok(Self {
-            owner: Arc::new(()),
             core: RefCell::new(Core::new(config)),
         })
+    }
+
+    fn with_scope(ruby: &Ruby, config: Value, scope: Scope) -> Result<Self, Error> {
+        let config = convert::config(ruby, config)?;
+        Ok(Self {
+            core: RefCell::new(Core::with_scope(config, scope.0)),
+        })
+    }
+
+    fn resumed(ruby: &Ruby, config: Value, scope: Scope, issued: Number) -> Result<Self, Error> {
+        let config = convert::config(ruby, config)?;
+        let core = Core::resumed(config, scope.0, issued.0).ok_or_else(|| {
+            Error::new(
+                ruby.exception_range_error(),
+                "issued is past the last sequence of a scope (2**48 - 1)",
+            )
+        })?;
+        Ok(Self {
+            core: RefCell::new(core),
+        })
+    }
+
+    fn scope(&self) -> u16 {
+        self.core.borrow().scope()
+    }
+
+    fn issued(&self) -> u64 {
+        self.core.borrow().issued()
     }
 
     fn config(ruby: &Ruby, this: &Self) -> Result<Value, Error> {
         convert::config_value(ruby, this.core.borrow().config())
     }
 
-    fn selected(
-        ruby: &Ruby,
-        this: Obj<Self>,
-        outcome: Result<Selection, Refusal>,
-    ) -> Result<Value, Error> {
+    fn selected(ruby: &Ruby, outcome: Result<Selection, Refusal>) -> Result<Value, Error> {
         match outcome {
             Ok(selection) => {
-                let handle = ruby.obj_wrap(Handle {
-                    owner: Arc::clone(&this.owner),
-                    ticket: selection.ticket,
-                });
+                let handle = ruby.obj_wrap(Handle(selection.ticket));
                 convert::selection_value(ruby, handle.as_value(), selection.reason)
             }
             Err(refused) => Ok(refusal(ruby, refused)),
@@ -72,7 +94,7 @@ impl Bandit {
     fn select_ucb1(ruby: &Ruby, this: Obj<Self>, pick: Number) -> Result<Value, Error> {
         this.check_frozen()?;
         let outcome = this.core.borrow_mut().select_ucb1(pick.0);
-        Self::selected(ruby, this, outcome)
+        Self::selected(ruby, outcome)
     }
 
     fn select_epsilon_greedy(
@@ -85,7 +107,7 @@ impl Bandit {
         let epsilon = convert::ratio(ruby, epsilon)?;
         let draws = convert::draws(ruby, draws)?;
         let outcome = this.core.borrow_mut().select_epsilon_greedy(epsilon, draws);
-        Self::selected(ruby, this, outcome)
+        Self::selected(ruby, outcome)
     }
 
     /// The core answers `Ok(())`; Ruby names the honoured effect with `done`.
@@ -103,25 +125,25 @@ impl Bandit {
         reward: Small,
     ) -> Result<Value, Error> {
         this.check_frozen()?;
-        if !Arc::ptr_eq(&this.owner, &handle.owner) {
-            return Ok(refusal(ruby, Refusal::UnknownTicket));
-        }
-        let outcome = this.core.borrow_mut().reward(handle.ticket, reward.0);
+        let outcome = this.core.borrow_mut().reward(handle.0, reward.0);
         Ok(Self::settled(ruby, outcome, "rewarded"))
     }
 
     fn abandon(ruby: &Ruby, this: Obj<Self>, handle: Obj<Handle>) -> Result<Value, Error> {
         this.check_frozen()?;
-        if !Arc::ptr_eq(&this.owner, &handle.owner) {
-            return Ok(refusal(ruby, Refusal::UnknownTicket));
-        }
-        let outcome = this.core.borrow_mut().abandon(handle.ticket);
+        let outcome = this.core.borrow_mut().abandon(handle.0);
         Ok(Self::settled(ruby, outcome, "abandoned"))
     }
 
-    fn revoke_before(this: Obj<Self>, serial: Number) -> Result<usize, Error> {
+    fn revoke_before(ruby: &Ruby, this: Obj<Self>, serial: Number) -> Result<Value, Error> {
         this.check_frozen()?;
-        Ok(this.core.borrow_mut().revoke_before(serial.0))
+        let outcome = this.core.borrow_mut().revoke_before(serial.0);
+        Ok(Self::voided(ruby, outcome))
+    }
+
+    fn revoke_all(this: Obj<Self>) -> Result<usize, Error> {
+        this.check_frozen()?;
+        Ok(this.core.borrow_mut().revoke_all())
     }
 
     fn voided(ruby: &Ruby, outcome: Result<usize, Refusal>) -> Value {
@@ -190,7 +212,7 @@ impl Bandit {
         self.core.borrow().outstanding()
     }
 
-    fn next_serial(&self) -> u64 {
+    fn next_serial(&self) -> Option<u64> {
         self.core.borrow().next_serial()
     }
 

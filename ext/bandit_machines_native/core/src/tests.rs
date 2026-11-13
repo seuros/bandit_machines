@@ -9,6 +9,9 @@ extern crate std;
 
 mod model;
 mod reference;
+mod scope;
+
+use periscope_machines::{SEQUENCE_MAX, scoped};
 
 use super::*;
 
@@ -16,6 +19,16 @@ const LOW: TieBreak = TieBreak::LowestIndex;
 
 fn open_bandit<const A: usize, const T: usize>(tie: TieBreak) -> Bandit<A, T> {
     let mut bandit = Bandit::new(Config::new(10, 5, tie).unwrap());
+    for arm in 0..A {
+        assert_eq!(bandit.open(arm), Ok(Opening::Opened));
+    }
+    bandit
+}
+
+/// A bandit resumed after `issued` serials, every arm open.
+fn resumed_bandit<const A: usize, const T: usize>(scope: u16, issued: u64) -> Bandit<A, T> {
+    let config = Config::new(10, 5, LOW).unwrap();
+    let mut bandit = Bandit::resumed(config, scope, issued).unwrap();
     for arm in 0..A {
         assert_eq!(bandit.open(arm), Ok(Opening::Opened));
     }
@@ -301,12 +314,13 @@ fn closing_keeps_statistics_and_accepts_the_late_reward() {
 fn revoke_and_reset_all_void_tickets_and_free_their_slots() {
     let mut bandit = open_bandit::<2, 3>(LOW);
     let tickets = [(); 3].map(|()| bandit.select_ucb1(0).unwrap().ticket);
-    assert_eq!(tickets.map(|ticket| ticket.serial()), [0, 1, 2]);
-    assert_eq!(bandit.revoke_before(0), 0);
-    assert_eq!(bandit.revoke_before(2), 2);
+    assert_eq!(tickets.map(|ticket| ticket.serial()), [1, 2, 3]);
+    assert_eq!(bandit.revoke_before(0), Ok(0));
+    assert_eq!(bandit.revoke_before(1), Ok(0));
+    assert_eq!(bandit.revoke_before(3), Ok(2));
     assert_eq!(bandit.reward(tickets[0], 1), Err(Refusal::UnknownTicket));
     assert_eq!(bandit.outstanding(), 1);
-    assert_eq!(bandit.next_serial(), 3);
+    assert_eq!(bandit.next_serial(), Some(4));
     assert_eq!(bandit.reward(tickets[2], 1), Ok(()));
     let pending = bandit.select_ucb1(0).unwrap().ticket;
     assert_eq!(bandit.reset_all(), Ok(1));
@@ -316,7 +330,7 @@ fn revoke_and_reset_all_void_tickets_and_free_their_slots() {
         let stats = bandit.stats(arm).unwrap();
         assert_eq!((stats.generation, stats.tries(), stats.open), (1, 0, true));
     }
-    assert_eq!(bandit.revoke_before(u64::MAX), 0);
+    assert_eq!(bandit.revoke_before(scoped(0, SEQUENCE_MAX)), Ok(0));
 }
 
 #[test]
@@ -377,8 +391,10 @@ fn u64_limits_refuse_without_mutating() {
     assert_eq!(bandit.reset(0), Ok(usize::from(held.unwrap().arm() == 0)));
 
     // Serials run out: selection is refused for good.
-    bandit.next_serial = u64::MAX - 1;
-    assert_eq!(bandit.select_ucb1(0).unwrap().ticket.serial(), u64::MAX - 1);
+    let mut bandit = resumed_bandit::<2, 2>(0, SEQUENCE_MAX - 1);
+    assert_eq!(bandit.next_serial(), Some(SEQUENCE_MAX));
+    assert_eq!(bandit.select_ucb1(0).unwrap().ticket.serial(), SEQUENCE_MAX);
+    assert_eq!(bandit.next_serial(), None);
     let before = bandit.clone();
     assert_eq!(bandit.select_ucb1(0), Err(Refusal::Exhausted));
     assert_eq!(

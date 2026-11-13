@@ -150,11 +150,14 @@ pub enum Refusal {
     NoOpenArm,
     /// Every ticket slot holds an outstanding selection.
     TicketsFull,
-    /// Ticket serials or an arm's generations are used up.
+    /// Every ticket serial of this bandit's scope has been issued, or an arm
+    /// has no generation left.
     Exhausted,
     /// The ticket's arm was reset after the selection was made.
     StaleTicket,
-    /// The ticket was already rewarded, abandoned or revoked, or is not ours.
+    /// The ticket names nothing here: it was already rewarded, abandoned or
+    /// revoked, or this bandit never issued it (another scope). Also the
+    /// answer for a serial of another scope.
     UnknownTicket,
     /// The reward is above the configured maximum.
     RewardOutOfRange,
@@ -168,7 +171,7 @@ impl core::fmt::Display for Refusal {
             Self::UnknownArm => "the arm index is not below the arm capacity",
             Self::NoOpenArm => "no arm is open for selection",
             Self::TicketsFull => "every ticket slot holds an outstanding selection",
-            Self::Exhausted => "ticket serials or the arm's generations are used up",
+            Self::Exhausted => "the scope's ticket serials or the arm's generations are used up",
             Self::StaleTicket => "the ticket's arm was reset after the selection",
             Self::UnknownTicket => "the ticket is spent or belongs to another bandit",
             Self::RewardOutOfRange => "the reward is above the configured maximum",
@@ -199,8 +202,9 @@ pub enum Closing {
 
 /// Proof of one selection, to be redeemed by exactly one reward or abandon.
 ///
-/// Scoped to one bandit value. It names the arm's generation at selection
-/// time, so a reward that arrives after the arm was reset is refused.
+/// Only the bandit that issued it honours it: its serial carries that
+/// bandit's scope. It names the arm's generation at selection time, so a
+/// reward that arrives after the arm was reset is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ticket {
     pub(crate) slot: usize,
@@ -222,10 +226,18 @@ impl Ticket {
         self.generation
     }
 
-    /// Position in the bandit's selection order; strictly increasing.
+    /// The ticket's scoped id: the issuing bandit's scope in the top 16 bits,
+    /// its position in that bandit's selection order (counted from one) below.
+    /// Strictly increasing within one bandit and never reissued.
     #[must_use]
     pub const fn serial(&self) -> u64 {
         self.serial
+    }
+
+    /// The scope of the bandit that issued this ticket.
+    #[must_use]
+    pub const fn scope(&self) -> u16 {
+        periscope_machines::scope_of(self.serial)
     }
 }
 

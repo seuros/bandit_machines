@@ -68,7 +68,7 @@ stateDiagram-v2
     [*] --> outstanding: select, returns a Selection
     outstanding --> counted: reward(ticket, value)
     outstanding --> returned: abandon(ticket)
-    outstanding --> returned: revoke_before(serial)
+    outstanding --> returned: revoke_before(serial) / revoke_all
     outstanding --> void: reset(arm) / reset_all
     counted --> [*]
     returned --> [*]
@@ -246,9 +246,34 @@ There are 16 arms, `0...16`. An index that is a valid Integer but names no arm i
 watermark = bandit.next_serial
 # ... an hour later, by your clock ...
 bandit.revoke_before(watermark)   # => how many tickets were abandoned
+bandit.revoke_all                 # => every ticket still out, no serial needed
 ```
 
-Every ticket has a `serial`, counting up. The bandit has no clock, so expiring old selections is yours: remember a serial, and later revoke everything before it.
+Every ticket has a `serial`, counting up from 1. The bandit has no clock, so expiring old selections is yours: remember a serial, and later revoke everything before it. A serial carries its bandit's scope (below), so one taken from a bandit in another scope answers `:unknown_ticket` and revokes nothing. `next_serial` is `nil` once a bandit has issued all 2**48-1 serials of its scope.
+
+To call everything back, use `revoke_all`, not a big serial: `2**64-1` belongs to scope 65535 and is refused everywhere else, and no serial sits above the last ticket of a scope. `revoke_all` never refuses, answers how many tickets it abandoned, and leaves every arm's counts and generation alone. `reset_all` also voids every ticket, but it forgets what the arms learned.
+
+### Scopes
+
+A ticket is only meaningful to the bandit that issued it. Run more than one bandit and each needs its own scope, an Integer in `0..65535` carried by every ticket it issues:
+
+```ruby
+config   = BanditMachines::Config.new(1, 0, :lowest_index)
+checkout = BanditMachines::Bandit.with_scope(config, 1)
+banner   = BanditMachines::Bandit.with_scope(config, 2)
+[checkout, banner].each { |bandit| bandit.open(0) }
+
+ticket = checkout.select_ucb1(0).ticket
+banner.select_ucb1(0)
+ticket.scope                 # => 1
+ticket.serial                # => 281474976710657, scope 1 in the top 16 bits, 1 below
+banner.reward(ticket, 1)     # => :unknown_ticket, not one of mine
+checkout.reward(ticket, 1)   # => :rewarded
+```
+
+`Bandit.new(config)` is scope zero, where serials are plain `1, 2, 3`. The scope is the bandit's identity, not policy, so it isn't part of `Config`: two bandits may share a config and must not share a scope. The bandit can't pick a scope for you: it reads no clock and rolls no dice. Leave two bandits in the same scope and they issue the same tickets, so one will happily count the other's reward.
+
+A restarted bandit counts from one again, so a ticket that outlived the restart could redeem a new selection. Resume from a saved count with `Bandit.resumed(config, scope, bandit.issued)`, or give each incarnation a new scope. `resumed` brings back the serial sequence and nothing else: every arm is closed, nothing is outstanding, earlier tickets are refused, and an `issued` above 2**48-1 raises `RangeError`.
 
 ### Capacity
 
@@ -280,8 +305,9 @@ math.log2_q56(8)           # => 216172782113783808, exactly 3.0
 ## The Rules of the Scout
 
 - **Everything is an Integer.** Rewards, `max_reward`, `prior` and ratio terms are `0..2**32-1`. Draws, serials and arm indices are `0..2**64-1`. Floats, nil, and strings raise `TypeError`, and so does an Array or a Hash where a `Config`, `Ratio` or `Draws` belongs. Out of range raises `RangeError`, and so do a zero `max_reward`, a `prior` above it and a ratio above one, when the value is built, so an invalid one never exists. An unknown or missing `tie_break` raises `ArgumentError`.
-- **Ruby mirrors Rust.** `Config`, `Ratio`, `Draws`, `Selection` and `ArmStats` have the fields of the core's structs, in order, and are passed positionally where the core takes them. `tie_break` and `reason` are the core's variants in snake case. A `Ticket` answers `arm`, `generation` and `serial`.
-- **Tickets belong to one bandit.** A `Ticket` from one `Bandit` is refused by another with `:unknown_ticket`. Tickets can't be built or copied by hand.
+- **Ruby mirrors Rust.** `Config`, `Ratio`, `Draws`, `Selection` and `ArmStats` have the fields of the core's structs, in order, and are passed positionally where the core takes them. `tie_break` and `reason` are the core's variants in snake case. A `Ticket` answers `arm`, `generation`, `serial` and `scope`.
+- **Scopes.** A `Ticket` is only meaningful to the bandit that issued it. Give each bandit its own scope with `Bandit.with_scope(config, scope)`; the core cannot pick one. A `Ticket` or serial from a bandit in another scope is refused with `:unknown_ticket` (not `:stale_ticket`, which means the arm was reset). Two bandits in the same scope issue the same tickets. Tickets can't be built or copied by hand.
+- **Restarts.** Resume from a saved count with `Bandit.resumed(config, scope, issued)`, or give each incarnation a new scope. `resumed` restores the serial sequence only; reopening arms and what they learned is yours.
 - **Refusals don't raise, and don't change anything.** `:unknown_arm`, `:no_open_arm`, `:tickets_full`, `:exhausted`, `:stale_ticket`, `:unknown_ticket`, `:reward_out_of_range` and `:saturated` are answers. Only malformed input raises.
 - **Every answer, by method.**
 
@@ -290,7 +316,8 @@ math.log2_q56(8)           # => 216172782113783808, exactly 3.0
   | `select_ucb1(pick)`, `select_epsilon_greedy(epsilon, draws)` | a `Selection` | `:no_open_arm`, `:tickets_full`, `:exhausted` |
   | `reward(ticket, reward)` | `:rewarded` | `:stale_ticket`, `:unknown_ticket`, `:reward_out_of_range`, `:saturated` |
   | `abandon(ticket)` | `:abandoned` | `:stale_ticket`, `:unknown_ticket` |
-  | `revoke_before(serial)` | the number of tickets revoked (Integer) | none |
+  | `revoke_before(serial)` | the number of tickets revoked (Integer) | `:unknown_ticket` |
+  | `revoke_all` | the number of tickets revoked (Integer) | none |
   | `reset(arm)` | the number of tickets voided (Integer) | `:unknown_arm`, `:exhausted` |
   | `reset_all` | the number of tickets voided (Integer) | `:exhausted` |
   | `decay(arm, keep)` | `:decayed` | `:unknown_arm` |

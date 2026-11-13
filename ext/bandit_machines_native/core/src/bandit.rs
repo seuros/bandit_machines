@@ -2,6 +2,8 @@
 
 use core::cmp::Ordering;
 
+use periscope_machines::{Issuer, scope_of};
+
 use crate::math::{bonus_q56, mean_q56};
 use crate::pick::{Candidate, best, draw_below};
 use crate::{
@@ -75,7 +77,8 @@ pub struct Bandit<const ARMS: usize, const TICKETS: usize> {
     pub(crate) config: Config,
     arms: [Arm; ARMS],
     tickets: [Option<Pending>; TICKETS],
-    pub(crate) next_serial: u64,
+    /// Issues ticket serials; never reissues one.
+    issuer: Issuer,
     outstanding: usize,
 }
 
@@ -86,16 +89,67 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
     /// Compiled number of outstanding tickets.
     pub const TICKETS: usize = TICKETS;
 
-    /// A bandit with every arm closed and nothing observed.
+    /// A bandit with every arm closed and nothing observed, in scope zero.
     #[must_use]
     pub const fn new(config: Config) -> Self {
+        Self::with_scope(config, 0)
+    }
+
+    /// A bandit with every arm closed and nothing observed, whose tickets
+    /// carry `scope`.
+    ///
+    /// The scope is the bandit's identity, not policy, so it is not part of
+    /// [`Config`]: replicas share a configuration and must not share a scope.
+    /// Tickets are only meaningful to the bandit that issued them, and two
+    /// bandits in the same scope issue the same tickets.
+    #[must_use]
+    pub const fn with_scope(config: Config, scope: u16) -> Self {
+        Self::build(config, Issuer::new(scope))
+    }
+
+    /// A bandit that continues `scope` after a restart: `issued` is what
+    /// [`issued`](Self::issued) answered when the caller saved it.
+    ///
+    /// Only the serial sequence is restored. Every arm is closed with nothing
+    /// observed and generation zero, and no ticket is outstanding: a ticket
+    /// issued before the restart is refused ([`Refusal::UnknownTicket`], or
+    /// [`Refusal::StaleTicket`] when its arm's generation differs), and
+    /// reopening arms and restoring what they learned is the caller's job.
+    /// The next ticket carries sequence `issued + 1`, so no serial is
+    /// reissued as long as the saved count is not lower than what the bandit
+    /// had really issued; save it before handing a ticket out.
+    ///
+    /// `None` when `issued` is beyond `periscope_machines::SEQUENCE_MAX`,
+    /// which no bandit reaches.
+    #[must_use]
+    pub const fn resumed(config: Config, scope: u16, issued: u64) -> Option<Self> {
+        match Issuer::resumed(scope, issued) {
+            Some(sequence) => Some(Self::build(config, sequence)),
+            None => None,
+        }
+    }
+
+    const fn build(config: Config, issuer: Issuer) -> Self {
         Self {
             config,
             arms: [Arm::NEW; ARMS],
             tickets: [None; TICKETS],
-            next_serial: 0,
+            issuer,
             outstanding: 0,
         }
+    }
+
+    /// The scope carried by every ticket this bandit issues.
+    #[must_use]
+    pub const fn scope(&self) -> u16 {
+        self.issuer.scope()
+    }
+
+    /// Serials issued in this scope so far, outstanding or not: the count to
+    /// save for [`resumed`](Self::resumed).
+    #[must_use]
+    pub const fn issued(&self) -> u64 {
+        self.issuer.issued()
     }
 
     /// The configuration this bandit was built with.
@@ -111,9 +165,13 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
     }
 
     /// Serial the next ticket will carry; every issued serial is below it.
+    /// `None` once every serial of the scope has been issued.
     #[must_use]
-    pub const fn next_serial(&self) -> u64 {
-        self.next_serial
+    pub const fn next_serial(&self) -> Option<u64> {
+        match self.issuer.peek() {
+            Ok(serial) => Some(serial),
+            Err(periscope_machines::Refusal::Exhausted) => None,
+        }
     }
 
     /// Snapshot of one arm, or `None` past the compiled capacity.
@@ -177,7 +235,7 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
             let arm = self.choose(rule, pick, |index| self.ucb1_index(index, total));
             (arm.ok_or(Refusal::NoOpenArm)?, Reason::UpperBound)
         };
-        Ok(self.issue(slot, arm, reason))
+        self.issue(slot, arm, reason)
     }
 
     /// Select by epsilon-greedy and issue a ticket for the chosen arm.
@@ -206,7 +264,7 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
             let arm = self.choose(self.config.tie_break, draws.pick, |index| self.mean(index));
             (arm, Reason::Exploit)
         };
-        Ok(self.issue(slot, arm.ok_or(Refusal::NoOpenArm)?, reason))
+        self.issue(slot, arm.ok_or(Refusal::NoOpenArm)?, reason)
     }
 
     /// UCB1 index of an open arm in Q8.56, in units of the reward range:
@@ -222,8 +280,9 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
     /// Redeem a ticket with its reward.
     ///
     /// # Errors
-    /// [`Refusal::StaleTicket`] if the arm was reset since the selection;
-    /// [`Refusal::UnknownTicket`] if the ticket is spent or foreign;
+    /// [`Refusal::UnknownTicket`] if this bandit never issued the ticket
+    /// (another scope) or it is spent; [`Refusal::StaleTicket`] if the arm
+    /// was reset since the selection;
     /// [`Refusal::RewardOutOfRange`] or [`Refusal::Saturated`] leave the
     /// ticket outstanding so it can be redeemed again.
     pub fn reward(&mut self, ticket: Ticket, reward: u32) -> Result<(), Refusal> {
@@ -248,7 +307,8 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
     /// Give a ticket back without a reward: the selection never happened.
     ///
     /// # Errors
-    /// [`Refusal::StaleTicket`] or [`Refusal::UnknownTicket`].
+    /// [`Refusal::UnknownTicket`] or [`Refusal::StaleTicket`], as for
+    /// [`reward`](Self::reward).
     pub fn abandon(&mut self, ticket: Ticket) -> Result<(), Refusal> {
         self.check(ticket)?;
         self.arms[ticket.arm].pending -= 1;
@@ -259,10 +319,32 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
 
     /// Abandon every outstanding ticket whose serial is below `serial`.
     ///
+    /// `serial` is a cut in this bandit's selection order: a ticket's
+    /// [`serial`](Ticket::serial) or an earlier [`next_serial`](Self::next_serial).
     /// Returns how many were revoked. Their late rewards answer
     /// [`Refusal::UnknownTicket`].
-    pub fn revoke_before(&mut self, serial: u64) -> usize {
-        self.void(|pending| pending.serial < serial)
+    ///
+    /// # Errors
+    /// [`Refusal::UnknownTicket`] for a serial of another scope: it orders
+    /// nothing here, and nothing is revoked. No serial is a cut above every
+    /// ticket (the last serial of a scope can be outstanding, and `u64::MAX`
+    /// belongs to another scope): to revoke them all, call
+    /// [`revoke_all`](Self::revoke_all).
+    pub fn revoke_before(&mut self, serial: u64) -> Result<usize, Refusal> {
+        if scope_of(serial) != self.issuer.scope() {
+            return Err(Refusal::UnknownTicket);
+        }
+        Ok(self.void(|pending| pending.serial < serial))
+    }
+
+    /// Abandon every outstanding ticket, whatever its serial. Returns how
+    /// many were revoked. Their late rewards answer [`Refusal::UnknownTicket`].
+    ///
+    /// Arm statistics and generations are untouched: unlike
+    /// [`reset_all`](Self::reset_all), nothing learned is forgotten. It
+    /// cannot refuse, and with nothing outstanding it changes nothing.
+    pub fn revoke_all(&mut self) -> usize {
+        self.void(|_| true)
     }
 
     /// Forget one arm: zero its statistics, bump its generation and void its
@@ -321,27 +403,37 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
         }
     }
 
-    /// Everything a selection needs before it may pick: a free ticket slot.
+    /// Everything a selection needs before it may pick: an open arm, a free
+    /// ticket slot and a serial left to issue.
     fn admit(&self) -> Result<usize, Refusal> {
         if !self.arms.iter().any(|arm| arm.open) {
             return Err(Refusal::NoOpenArm);
         }
         let slot = self.tickets.iter().position(Option::is_none);
         let slot = slot.ok_or(Refusal::TicketsFull)?;
-        if self.next_serial == u64::MAX {
-            return Err(Refusal::Exhausted);
+        match self.issuer.peek() {
+            Ok(_) => Ok(slot),
+            Err(periscope_machines::Refusal::Exhausted) => Err(Refusal::Exhausted),
         }
-        Ok(slot)
     }
 
-    const fn issue(&mut self, slot: usize, arm: usize, reason: Reason) -> Selection {
-        let serial = self.next_serial;
-        self.next_serial += 1;
+    /// The serial is issued first and is the only step that can refuse, so a
+    /// refused selection spends no serial and changes nothing.
+    const fn issue(
+        &mut self,
+        slot: usize,
+        arm: usize,
+        reason: Reason,
+    ) -> Result<Selection, Refusal> {
+        let serial = match self.issuer.issue() {
+            Ok(serial) => serial,
+            Err(periscope_machines::Refusal::Exhausted) => return Err(Refusal::Exhausted),
+        };
         self.tickets[slot] = Some(Pending { arm, serial });
         self.outstanding += 1;
         let state = &mut self.arms[arm];
         state.pending += 1;
-        Selection {
+        Ok(Selection {
             ticket: Ticket {
                 slot,
                 arm,
@@ -349,10 +441,15 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
                 serial,
             },
             reason,
-        }
+        })
     }
 
+    /// Origin first: a ticket this bandit's issuer never handed out names
+    /// nothing here, whatever slot, arm and generation it carries.
     fn check(&self, ticket: Ticket) -> Result<(), Refusal> {
+        if !self.issuer.owns(ticket.serial) {
+            return Err(Refusal::UnknownTicket);
+        }
         let arm = self.arms.get(ticket.arm).ok_or(Refusal::UnknownTicket)?;
         if arm.generation != ticket.generation {
             return Err(Refusal::StaleTicket);

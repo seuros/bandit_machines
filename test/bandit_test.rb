@@ -1,26 +1,8 @@
 # frozen_string_literal: true
-require 'minitest/autorun'
-require 'bandit_machines'
+require_relative 'support'
 
 class BanditTest < Minitest::Test
-  MAX = 2**64 - 1
-
-  def config(max_reward: 10, prior: 5, tie_break: :lowest_index)
-    BanditMachines::Config.new(max_reward, prior, tie_break)
-  end
-
-  def build(arms: 3, **options)
-    bandit = BanditMachines::Bandit.new(config(**options))
-    arms.times { |arm| assert_equal :opened, bandit.open(arm) }
-    bandit
-  end
-
-  def ratio(numerator, denominator) = BanditMachines::Ratio.new(numerator, denominator)
-  def draws(gate, pick) = BanditMachines::Draws.new(gate, pick)
-
-  def feed(bandit, rewards)
-    rewards.each { |reward| assert_equal :rewarded, bandit.reward(bandit.select_ucb1(0).ticket, reward) }
-  end
+  include BanditSupport
 
   def test_capacity_constants_and_configuration
     bandit = build(tie_break: :draw)
@@ -91,7 +73,7 @@ class BanditTest < Minitest::Test
       assert_nil bandit.stats(arm)
       assert_nil bandit.ucb1_index_q56(arm)
     end
-    assert_equal [0, 0], [bandit.outstanding, bandit.next_serial]
+    assert_equal [0, 1], [bandit.outstanding, bandit.next_serial]
     assert_equal [0] * 16, 16.times.map { bandit.stats(it).generation }
   end
 
@@ -100,13 +82,13 @@ class BanditTest < Minitest::Test
     assert_equal [false] * 16, 16.times.map { |arm| bandit.stats(arm).open }
     assert_equal :no_open_arm, bandit.select_ucb1(0)
     assert_equal :no_open_arm, bandit.select_epsilon_greedy(ratio(1, 1), draws(0, 0))
-    assert_equal [0, 0], [bandit.outstanding, bandit.next_serial]
+    assert_equal [0, 1, 0, 0], [bandit.outstanding, bandit.next_serial, bandit.scope, bandit.issued]
     assert_equal [0, 0, 0], bandit.stats(0).to_h.values_at(:generation, :pending, :rewarded)
     16.times { |arm| assert_nil bandit.ucb1_index_q56(arm) }
     assert_equal :already_closed, bandit.close(7)
     assert_equal :opened, bandit.open(7)
     chosen = bandit.select_ucb1(MAX)
-    assert_equal [7, :cold_start, 0], [chosen.arm, chosen.reason, chosen.ticket.serial]
+    assert_equal [7, :cold_start, 1], [chosen.arm, chosen.reason, chosen.ticket.serial]
     assert_equal [7], 16.times.select { |arm| bandit.stats(arm).open }
   end
 
@@ -115,7 +97,7 @@ class BanditTest < Minitest::Test
     first = bandit.select_ucb1(0)
     assert_instance_of BanditMachines::Selection, first
     assert_instance_of BanditMachines::Ticket, first.ticket
-    assert_equal [0, :cold_start, 0, 0, 0], [first.arm, first.reason, first.ticket.arm, first.ticket.serial,
+    assert_equal [0, :cold_start, 0, 1, 0], [first.arm, first.reason, first.ticket.arm, first.ticket.serial,
                                              first.ticket.generation]
     assert_predicate first, :frozen?
     assert_equal %i[ticket reason], BanditMachines::Selection.members
@@ -127,8 +109,8 @@ class BanditTest < Minitest::Test
     assert_equal 2**56, bandit.ucb1_index_q56(1) - bandit.ucb1_index_q56(0)
     assert_nil bandit.ucb1_index_q56(2)
     third = bandit.select_ucb1(0)
-    assert_equal [1, :upper_bound, 2], [third.arm, third.reason, third.ticket.serial]
-    assert_equal [1, 3], [bandit.outstanding, bandit.next_serial]
+    assert_equal [1, :upper_bound, 3], [third.arm, third.reason, third.ticket.serial]
+    assert_equal [1, 4], [bandit.outstanding, bandit.next_serial]
   end
 
   def test_epsilon_greedy_uses_only_the_supplied_draws
@@ -177,13 +159,9 @@ class BanditTest < Minitest::Test
     assert_equal 0, bandit.outstanding
   end
 
-  def test_tickets_belong_to_one_bandit_and_cannot_be_forged
-    a = build
-    b = build
+  def test_tickets_cannot_be_forged_and_outlive_their_bandit
+    a = scoped(1)
     ticket = a.select_ucb1(0).ticket
-    b.select_ucb1(0)
-    assert_equal :unknown_ticket, b.reward(ticket, 1)
-    assert_equal :unknown_ticket, b.abandon(ticket)
     assert_raises(TypeError) { BanditMachines::Ticket.allocate }
     assert_raises(TypeError) { BanditMachines::Bandit.allocate }
     assert_raises(TypeError) { ticket.dup }
@@ -191,6 +169,7 @@ class BanditTest < Minitest::Test
     assert_raises(TypeError) { a.reward(Object.new, 1) }
     a = nil
     GC.start
+    assert_equal 1, ticket.scope
     assert_equal :unknown_ticket, build.abandon(ticket)
   end
 
@@ -200,7 +179,7 @@ class BanditTest < Minitest::Test
     assert_equal :tickets_full, bandit.select_ucb1(0)
     assert_equal :tickets_full, bandit.select_epsilon_greedy(ratio(1, 1), draws(0, 0))
     assert_equal 64, bandit.outstanding
-    assert_equal 60, bandit.revoke_before(60)
+    assert_equal 60, bandit.revoke_before(61)
     assert_equal :unknown_ticket, bandit.reward(tickets.first, 1)
     assert_equal :rewarded, bandit.reward(tickets.last, 1)
     assert_equal 3, bandit.outstanding
@@ -284,8 +263,27 @@ class BanditTest < Minitest::Test
       assert_raises(RangeError) { bandit.ucb1_index_q56(arm) }
       assert_raises(RangeError) { bandit.decay(arm, ratio(1, 1)) }
     end
-    assert_equal [1, 1], [bandit.outstanding, bandit.next_serial]
+    assert_equal [1, 2], [bandit.outstanding, bandit.next_serial]
     assert_equal :rewarded, bandit.reward(ticket, 10)
+  end
+
+  def test_revoke_all_revokes_every_ticket_and_keeps_the_statistics
+    bandit = scoped(3, arms: 2)
+    assert_equal :rewarded, bandit.reward(bandit.select_ucb1(0).ticket, 7)
+    assert_equal 0, bandit.revoke_all
+    held = 3.times.map { bandit.select_ucb1(0).ticket }
+    stats = 2.times.map { |arm| bandit.stats(arm) }
+    # The old "everything" serial is another scope's, and revokes nothing.
+    assert_equal :unknown_ticket, bandit.revoke_before(MAX)
+    assert_equal 3, bandit.outstanding
+    assert_equal 3, bandit.revoke_all
+    assert_equal 0, bandit.outstanding
+    held.each { |ticket| assert_equal :unknown_ticket, bandit.reward(ticket, 1) }
+    2.times do |arm|
+      assert_equal stats[arm].with(pending: 0), bandit.stats(arm)
+    end
+    assert_equal [1, 7, 0], [stats[0].rewarded, stats[0].reward_sum, bandit.stats(0).generation]
+    assert_raises(ArgumentError) { bandit.revoke_all(1) }
   end
 
   def test_freeze_guards
@@ -297,13 +295,14 @@ class BanditTest < Minitest::Test
     assert_raises(FrozenError) { bandit.reward(ticket, 1) }
     assert_raises(FrozenError) { bandit.abandon(ticket) }
     assert_raises(FrozenError) { bandit.revoke_before(1) }
+    assert_raises(FrozenError) { bandit.revoke_all }
     assert_raises(FrozenError) { bandit.reset(0) }
     assert_raises(FrozenError) { bandit.reset_all }
     assert_raises(FrozenError) { bandit.decay(0, ratio(1, 2)) }
     assert_raises(FrozenError) { bandit.decay_all(ratio(1, 2)) }
     assert_raises(FrozenError) { bandit.open(5) }
     assert_raises(FrozenError) { bandit.close(0) }
-    assert_equal [1, 1, 1], [bandit.outstanding, bandit.next_serial, bandit.stats(0).pending]
+    assert_equal [1, 2, 1], [bandit.outstanding, bandit.next_serial, bandit.stats(0).pending]
   end
 
   def test_gc_stress_and_upper_bounds
@@ -315,7 +314,8 @@ class BanditTest < Minitest::Test
     GC.compact
     assert_equal :rewarded, bandit.reward(chosen.ticket, 2**32 - 1)
     assert_equal 2**32 - 1, bandit.stats(1).reward_sum
-    assert_equal 0, bandit.revoke_before(MAX)
+    assert_equal 0, bandit.revoke_before((2**48) - 1)
+    assert_equal :unknown_ticket, bandit.revoke_before(MAX)
   ensure
     GC.stress = previous
   end

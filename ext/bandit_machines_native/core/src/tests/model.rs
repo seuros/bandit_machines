@@ -29,6 +29,7 @@ pub struct Model {
     pub arms: Vec<ModelArm>,
     pub live: Vec<ModelTicket>,
     pub ticket_capacity: usize,
+    /// Plain sequence number of the next ticket, counted from one.
     pub next_serial: u64,
 }
 
@@ -47,7 +48,7 @@ impl Model {
             arms: std::vec![arm; arms],
             live: Vec::new(),
             ticket_capacity: tickets,
-            next_serial: 0,
+            next_serial: 1,
         }
     }
 
@@ -170,6 +171,12 @@ impl Model {
         let before = self.live.len();
         self.live.retain(|ticket| ticket.serial >= serial);
         before - self.live.len()
+    }
+
+    pub fn revoke_all(&mut self) -> usize {
+        let revoked = self.live.len();
+        self.live.clear();
+        revoked
     }
 
     pub fn reset(&mut self, arm: usize) -> usize {

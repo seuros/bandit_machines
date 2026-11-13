@@ -66,10 +66,15 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     handle.define_method("arm", method!(Handle::arm, 0))?;
     handle.define_method("generation", method!(Handle::generation, 0))?;
     handle.define_method("serial", method!(Handle::serial, 0))?;
+    handle.define_method("scope", method!(Handle::scope, 0))?;
 
     let class = module.define_class("Bandit", ruby.class_object())?;
     class.undef_default_alloc_func();
     class.define_singleton_method("new", function!(Bandit::new, 1))?;
+    class.define_singleton_method("with_scope", function!(Bandit::with_scope, 2))?;
+    class.define_singleton_method("resumed", function!(Bandit::resumed, 3))?;
+    class.define_method("scope", method!(Bandit::scope, 0))?;
+    class.define_method("issued", method!(Bandit::issued, 0))?;
     class.define_method("config", method!(Bandit::config, 0))?;
     class.define_method("outstanding", method!(Bandit::outstanding, 0))?;
     class.define_method("next_serial", method!(Bandit::next_serial, 0))?;
@@ -85,6 +90,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("reward", method!(Bandit::reward, 2))?;
     class.define_method("abandon", method!(Bandit::abandon, 1))?;
     class.define_method("revoke_before", method!(Bandit::revoke_before, 1))?;
+    class.define_method("revoke_all", method!(Bandit::revoke_all, 0))?;
     class.define_method("reset", method!(Bandit::reset, 1))?;
     class.define_method("reset_all", method!(Bandit::reset_all, 0))?;
     class.define_method("decay", method!(Bandit::decay, 2))?;

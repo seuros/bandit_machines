@@ -39,10 +39,16 @@ module BanditMachines
                 | (gate: Integer, pick: Integer) -> Draws
   end
 
+  # Mirrors the core's `Ticket`. Opaque; it cannot be built or copied by hand.
+  # Only the bandit that issued it honours it.
   class Ticket
     def arm: () -> Integer
     def generation: () -> Integer
+    # The scoped id: the issuing bandit's scope in the top 16 bits, the
+    # position in its selection order (from one) in the low 48.
     def serial: () -> Integer
+    # The scope of the bandit that issued it, 0..65535.
+    def scope: () -> Integer
   end
 
   class Selection < Data
@@ -78,10 +84,23 @@ module BanditMachines
   # (ARM_CAPACITY or above) is answered, not raised: :unknown_arm from the
   # mutating methods, nil from `stats` and `ucb1_index_q56`.
   class Bandit
+    # Scope zero.
     def self.new: (Config config) -> Bandit
+    # `scope` is an Integer in 0..65535: TypeError otherwise, RangeError
+    # outside the range.
+    def self.with_scope: (Config config, Integer scope) -> Bandit
+    # Continues `scope` after a restart from a saved `issued` count. Restores
+    # only the serial sequence: every arm is closed and nothing is outstanding.
+    # RangeError when `issued` is above 2**48 - 1.
+    def self.resumed: (Config config, Integer scope, Integer issued) -> Bandit
     def config: () -> Config
+    # The scope carried by every Ticket this bandit issues.
+    def scope: () -> Integer
+    # Serials issued in this scope so far: the count to save for `resumed`.
+    def issued: () -> Integer
     def outstanding: () -> Integer
-    def next_serial: () -> Integer
+    # nil once every serial of the scope has been issued.
+    def next_serial: () -> Integer?
     def stats: (Integer arm) -> ArmStats?
     # Honoured: :opened, or the repeat :already_open. Refused: :unknown_arm.
     def open: (Integer arm) -> (:opened | :already_open | :unknown_arm)
@@ -92,13 +111,18 @@ module BanditMachines
     def select_epsilon_greedy: (Ratio epsilon, Draws draws) -> (Selection | :no_open_arm | :tickets_full | :exhausted)
     # nil for an unknown, closed or cold arm.
     def ucb1_index_q56: (Integer arm) -> Integer?
-    # Honoured: :rewarded. Refused: :stale_ticket, :unknown_ticket,
-    # :reward_out_of_range, :saturated.
+    # Honoured: :rewarded. Refused: :stale_ticket, :unknown_ticket (a Ticket
+    # from a bandit in another scope included), :reward_out_of_range,
+    # :saturated.
     def reward: (Ticket ticket, Integer reward) -> (:rewarded | :stale_ticket | :unknown_ticket | :reward_out_of_range | :saturated)
     # Honoured: :abandoned. Refused: :stale_ticket, :unknown_ticket.
     def abandon: (Ticket ticket) -> (:abandoned | :stale_ticket | :unknown_ticket)
-    # The number of tickets revoked. Never refuses.
-    def revoke_before: (Integer serial) -> Integer
+    # Honoured: the number of tickets revoked. Refused: :unknown_ticket, for a
+    # serial of another scope.
+    def revoke_before: (Integer serial) -> (Integer | :unknown_ticket)
+    # The number of tickets revoked: every outstanding one. Never refuses;
+    # arm statistics and generations are kept.
+    def revoke_all: () -> Integer
     # Honoured: the number of tickets voided. Refused: :unknown_arm, :exhausted.
     def reset: (Integer arm) -> (Integer | :unknown_arm | :exhausted)
     # Honoured: the number of tickets voided. Refused: :exhausted.
