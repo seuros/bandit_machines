@@ -17,7 +17,7 @@ const LOW: TieBreak = TieBreak::LowestIndex;
 fn open_bandit<const A: usize, const T: usize>(tie: TieBreak) -> Bandit<A, T> {
     let mut bandit = Bandit::new(Config::new(10, 5, tie).unwrap());
     for arm in 0..A {
-        assert_eq!(bandit.open(arm), Ok(true));
+        assert_eq!(bandit.open(arm), Ok(Opening::Opened));
     }
     bandit
 }
@@ -57,6 +57,31 @@ fn config_and_ratio_reject_out_of_range_values() {
 }
 
 #[test]
+fn repeated_open_and_close_are_honoured_and_change_nothing() {
+    let mut bandit = open_bandit::<3, 4>(LOW);
+    feed(&mut bandit, &[4, 6, 2]);
+    let pending = bandit.select_ucb1(0).unwrap();
+    bandit.close(2).unwrap();
+
+    let before = bandit.clone();
+    assert_eq!(bandit.open(0), Ok(Opening::AlreadyOpen));
+    assert_eq!(bandit, before);
+    assert_eq!(bandit.close(2), Ok(Closing::AlreadyClosed));
+    assert_eq!(bandit, before);
+    // A refused call changes nothing either.
+    assert_eq!(bandit.open(3), Err(Refusal::UnknownArm));
+    assert_eq!(bandit.close(3), Err(Refusal::UnknownArm));
+    assert_eq!(bandit, before);
+
+    // The first call is the one that changes eligibility, and only that.
+    assert_eq!(bandit.close(0), Ok(Closing::Closed));
+    assert_ne!(bandit, before);
+    assert_eq!(bandit.open(0), Ok(Opening::Opened));
+    assert_eq!(bandit, before);
+    assert_eq!(bandit.reward(pending.ticket, 1), Ok(()));
+}
+
+#[test]
 fn selection_needs_an_open_arm_and_a_free_ticket() {
     let mut closed = Bandit::<2, 2>::new(Config::new(1, 0, LOW).unwrap());
     assert_eq!(closed.select_ucb1(0), Err(Refusal::NoOpenArm));
@@ -66,11 +91,11 @@ fn selection_needs_an_open_arm_and_a_free_ticket() {
     );
     assert_eq!(closed.open(2), Err(Refusal::UnknownArm));
     assert_eq!(closed.close(2), Err(Refusal::UnknownArm));
-    assert_eq!(closed.open(1), Ok(true));
-    assert_eq!(closed.open(1), Ok(false));
+    assert_eq!(closed.open(1), Ok(Opening::Opened));
+    assert_eq!(closed.open(1), Ok(Opening::AlreadyOpen));
     assert_eq!(closed.select_ucb1(0).unwrap().arm(), 1);
-    assert_eq!(closed.close(1), Ok(true));
-    assert_eq!(closed.close(1), Ok(false));
+    assert_eq!(closed.close(1), Ok(Closing::Closed));
+    assert_eq!(closed.close(1), Ok(Closing::AlreadyClosed));
 
     let mut full = open_bandit::<2, 2>(LOW);
     let first = full.select_ucb1(0).unwrap();

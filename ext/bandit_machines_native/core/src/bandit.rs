@@ -4,7 +4,9 @@ use core::cmp::Ordering;
 
 use crate::math::{bonus_q56, mean_q56};
 use crate::pick::{Candidate, best, draw_below};
-use crate::{ArmStats, Config, Draws, Ratio, Reason, Refusal, Selection, Ticket, TieBreak};
+use crate::{
+    ArmStats, Closing, Config, Draws, Opening, Ratio, Reason, Refusal, Selection, Ticket, TieBreak,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Arm {
@@ -126,23 +128,36 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
         })
     }
 
-    /// Make an arm eligible for selection. `Ok(false)` if it already was.
+    /// Make an arm eligible for selection.
+    ///
+    /// [`Opening::AlreadyOpen`] is an idempotent repeat: it changes nothing.
     ///
     /// # Errors
     /// [`Refusal::UnknownArm`] past the compiled capacity.
-    pub fn open(&mut self, arm: usize) -> Result<bool, Refusal> {
-        self.set_open(arm, true)
+    pub fn open(&mut self, arm: usize) -> Result<Opening, Refusal> {
+        let arm = self.arms.get_mut(arm).ok_or(Refusal::UnknownArm)?;
+        if arm.open {
+            return Ok(Opening::AlreadyOpen);
+        }
+        arm.open = true;
+        Ok(Opening::Opened)
     }
 
-    /// Make an arm ineligible. `Ok(false)` if it already was.
+    /// Make an arm ineligible.
     ///
     /// Closing is eligibility only: statistics stay, and outstanding tickets
-    /// for the arm are still rewardable.
+    /// for the arm are still rewardable. [`Closing::AlreadyClosed`] is an
+    /// idempotent repeat: it changes nothing.
     ///
     /// # Errors
     /// [`Refusal::UnknownArm`] past the compiled capacity.
-    pub fn close(&mut self, arm: usize) -> Result<bool, Refusal> {
-        self.set_open(arm, false)
+    pub fn close(&mut self, arm: usize) -> Result<Closing, Refusal> {
+        let arm = self.arms.get_mut(arm).ok_or(Refusal::UnknownArm)?;
+        if !arm.open {
+            return Ok(Closing::AlreadyClosed);
+        }
+        arm.open = false;
+        Ok(Closing::Closed)
     }
 
     /// Select by UCB1 and issue a ticket for the chosen arm.
@@ -306,13 +321,6 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
         }
     }
 
-    fn set_open(&mut self, arm: usize, open: bool) -> Result<bool, Refusal> {
-        let arm = self.arms.get_mut(arm).ok_or(Refusal::UnknownArm)?;
-        let changed = arm.open != open;
-        arm.open = open;
-        Ok(changed)
-    }
-
     /// Everything a selection needs before it may pick: a free ticket slot.
     fn admit(&self) -> Result<usize, Refusal> {
         if !self.arms.iter().any(|arm| arm.open) {
@@ -355,7 +363,7 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
         };
         match self.tickets.get(ticket.slot) {
             Some(Some(pending)) if *pending == expected => Ok(()),
-            _ => Err(Refusal::UnknownTicket),
+            Some(Some(_) | None) | None => Err(Refusal::UnknownTicket),
         }
     }
 

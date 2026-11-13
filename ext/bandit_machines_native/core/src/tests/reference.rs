@@ -5,7 +5,9 @@ extern crate std;
 use std::vec::Vec;
 
 use super::model::{Model, ModelTicket, explores};
-use crate::{Bandit, Config, Draws, Ratio, Reason, Refusal, Selection, Ticket, TieBreak};
+use crate::{
+    Bandit, Closing, Config, Draws, Opening, Ratio, Reason, Refusal, Selection, Ticket, TieBreak,
+};
 
 const ARMS: usize = 5;
 const TICKETS: usize = 6;
@@ -162,13 +164,25 @@ impl Run {
             30..55 => self.select_epsilon_greedy(),
             55..85 => self.redeem(),
             85..90 => {
-                let changed = !self.model.arms[arm].open;
-                assert_eq!(self.core.open(arm), Ok(changed));
+                let before = self.core.clone();
+                let expected = if self.model.arms[arm].open {
+                    Opening::AlreadyOpen
+                } else {
+                    Opening::Opened
+                };
+                assert_eq!(self.core.open(arm), Ok(expected));
+                assert_eq!(self.core == before, expected == Opening::AlreadyOpen);
                 self.model.arms[arm].open = true;
             }
             90..92 => {
-                let changed = self.model.arms[arm].open;
-                assert_eq!(self.core.close(arm), Ok(changed));
+                let before = self.core.clone();
+                let expected = if self.model.arms[arm].open {
+                    Closing::Closed
+                } else {
+                    Closing::AlreadyClosed
+                };
+                assert_eq!(self.core.close(arm), Ok(expected));
+                assert_eq!(self.core == before, expected == Closing::AlreadyClosed);
                 self.model.arms[arm].open = false;
             }
             92..94 => {

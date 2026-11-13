@@ -5,21 +5,52 @@ module BanditMachines
 
   type tie_break = :lowest_index | :highest_index | :least_tried | :draw
   type reason = :cold_start | :explore | :exploit | :upper_bound
-  type select_refusal = :no_open_arm | :tickets_full | :exhausted
-  type ticket_refusal = :stale_ticket | :unknown_ticket
+  # Every symbol that means "this call was not honoured and changed nothing":
+  # one per variant of the core's `Refusal`. Each method below lists exactly
+  # the ones it can answer.
+  type refusal = :unknown_arm | :no_open_arm | :tickets_full | :exhausted | :stale_ticket | :unknown_ticket
+               | :reward_out_of_range | :saturated
+
+  # `0 < max_reward`, `prior <= max_reward`, both in 0..2**32-1; anything else
+  # raises TypeError or RangeError, an unknown tie_break ArgumentError.
+  class Config < Data
+    attr_reader max_reward: Integer
+    attr_reader prior: Integer
+    attr_reader tie_break: tie_break
+    def self.new: (Integer max_reward, Integer prior, tie_break tie_break) -> Config
+                | (max_reward: Integer, prior: Integer, tie_break: tie_break) -> Config
+  end
+
+  # `numerator <= denominator`, `denominator > 0`, both in 0..2**32-1.
+  class Ratio < Data
+    ZERO: Ratio
+    ONE: Ratio
+    attr_reader numerator: Integer
+    attr_reader denominator: Integer
+    def self.new: (Integer numerator, Integer denominator) -> Ratio
+                | (numerator: Integer, denominator: Integer) -> Ratio
+  end
+
+  # Two uniform draws, each in 0..2**64-1.
+  class Draws < Data
+    attr_reader gate: Integer
+    attr_reader pick: Integer
+    def self.new: (Integer gate, Integer pick) -> Draws
+                | (gate: Integer, pick: Integer) -> Draws
+  end
 
   class Ticket
     def arm: () -> Integer
-    def serial: () -> Integer
     def generation: () -> Integer
+    def serial: () -> Integer
   end
 
   class Selection < Data
     attr_reader ticket: Ticket
-    attr_reader arm: Integer
     attr_reader reason: reason
-    def self.new: (Ticket ticket, Integer arm, reason reason) -> Selection
-                | (ticket: Ticket, arm: Integer, reason: reason) -> Selection
+    def self.new: (Ticket ticket, reason reason) -> Selection
+                | (ticket: Ticket, reason: reason) -> Selection
+    def arm: () -> Integer
   end
 
   class ArmStats < Data
@@ -33,26 +64,49 @@ module BanditMachines
     def tries: () -> Integer
   end
 
+  # The core's `math` module: unsigned Q8.56 fixed point, integers in and out.
+  module Math
+    FRACTION_BITS: Integer
+    ONE: Integer
+    def self.log2_q56: (Integer value) -> Integer
+    def self.ln_q56: (Integer value) -> Integer
+    def self.bonus_q56: (Integer total, Integer tries) -> Integer
+    def self.mean_q56: (Integer sum, Integer count, Integer range) -> Integer
+  end
+
+  # An arm index is any Integer in 0..2**64-1. One that names no arm
+  # (ARM_CAPACITY or above) is answered, not raised: :unknown_arm from the
+  # mutating methods, nil from `stats` and `ucb1_index_q56`.
   class Bandit
-    def self.new: (max_reward: Integer, prior: Integer, ?tie_break: tie_break) -> Bandit
-    def select_ucb1: (?pick: Integer) -> (Selection | select_refusal)
-    def select_epsilon_greedy: (numerator: Integer, denominator: Integer, gate: Integer, pick: Integer) -> (Selection | select_refusal)
-    def reward: (Ticket ticket, Integer reward) -> (true | ticket_refusal | :reward_out_of_range | :saturated)
-    def abandon: (Ticket ticket) -> (true | ticket_refusal)
-    def revoke_before: (Integer serial) -> Integer
-    def reset: (Integer arm) -> (Integer | :exhausted)
-    def reset_all: () -> (Integer | :exhausted)
-    def decay: (Integer arm, numerator: Integer, denominator: Integer) -> true
-    def decay_all: (numerator: Integer, denominator: Integer) -> true
-    def open: (Integer arm) -> bool
-    def close: (Integer arm) -> bool
-    def stats: (Integer arm) -> ArmStats
-    def ucb1_index_q56: (Integer arm) -> Integer?
+    def self.new: (Config config) -> Bandit
+    def config: () -> Config
     def outstanding: () -> Integer
     def next_serial: () -> Integer
-    def max_reward: () -> Integer
-    def prior: () -> Integer
-    def tie_break: () -> tie_break
+    def stats: (Integer arm) -> ArmStats?
+    # Honoured: :opened, or the repeat :already_open. Refused: :unknown_arm.
+    def open: (Integer arm) -> (:opened | :already_open | :unknown_arm)
+    # Honoured: :closed, or the repeat :already_closed. Refused: :unknown_arm.
+    def close: (Integer arm) -> (:closed | :already_closed | :unknown_arm)
+    # Honoured: a Selection. Refused: :no_open_arm, :tickets_full, :exhausted.
+    def select_ucb1: (Integer pick) -> (Selection | :no_open_arm | :tickets_full | :exhausted)
+    def select_epsilon_greedy: (Ratio epsilon, Draws draws) -> (Selection | :no_open_arm | :tickets_full | :exhausted)
+    # nil for an unknown, closed or cold arm.
+    def ucb1_index_q56: (Integer arm) -> Integer?
+    # Honoured: :rewarded. Refused: :stale_ticket, :unknown_ticket,
+    # :reward_out_of_range, :saturated.
+    def reward: (Ticket ticket, Integer reward) -> (:rewarded | :stale_ticket | :unknown_ticket | :reward_out_of_range | :saturated)
+    # Honoured: :abandoned. Refused: :stale_ticket, :unknown_ticket.
+    def abandon: (Ticket ticket) -> (:abandoned | :stale_ticket | :unknown_ticket)
+    # The number of tickets revoked. Never refuses.
+    def revoke_before: (Integer serial) -> Integer
+    # Honoured: the number of tickets voided. Refused: :unknown_arm, :exhausted.
+    def reset: (Integer arm) -> (Integer | :unknown_arm | :exhausted)
+    # Honoured: the number of tickets voided. Refused: :exhausted.
+    def reset_all: () -> (Integer | :exhausted)
+    # Honoured: :decayed. Refused: :unknown_arm.
+    def decay: (Integer arm, Ratio keep) -> (:decayed | :unknown_arm)
+    # Always honoured.
+    def decay_all: (Ratio keep) -> :decayed
     def arm_capacity: () -> Integer
     def ticket_capacity: () -> Integer
   end

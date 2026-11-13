@@ -12,7 +12,6 @@ pub use bandit::Bandit;
 /// Applies to cold-start sweeps, UCB1 indices and greedy means alike. Scores
 /// are compared as integers, so "the same" is exact and platform independent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum TieBreak {
     /// The tied arm with the lowest index.
     LowestIndex,
@@ -131,7 +130,6 @@ pub struct Draws {
 
 /// Why a selection landed on its arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Reason {
     /// The arm had no rewards and no outstanding tickets.
     ColdStart,
@@ -145,7 +143,6 @@ pub enum Reason {
 
 /// Why a call was refused. A refused call changes nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Refusal {
     /// The arm index is not below the compiled arm capacity.
     UnknownArm,
@@ -163,6 +160,41 @@ pub enum Refusal {
     RewardOutOfRange,
     /// The arm's reward count or reward sum would overflow; decay first.
     Saturated,
+}
+
+impl core::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::UnknownArm => "the arm index is not below the arm capacity",
+            Self::NoOpenArm => "no arm is open for selection",
+            Self::TicketsFull => "every ticket slot holds an outstanding selection",
+            Self::Exhausted => "ticket serials or the arm's generations are used up",
+            Self::StaleTicket => "the ticket's arm was reset after the selection",
+            Self::UnknownTicket => "the ticket is spent or belongs to another bandit",
+            Self::RewardOutOfRange => "the reward is above the configured maximum",
+            Self::Saturated => "the arm's reward count or sum would overflow",
+        })
+    }
+}
+
+impl core::error::Error for Refusal {}
+
+/// What an honoured [`Bandit::open`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opening {
+    /// The arm was closed and is now eligible for selection.
+    Opened,
+    /// The arm was already open: an idempotent repeat that changed nothing.
+    AlreadyOpen,
+}
+
+/// What an honoured [`Bandit::close`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Closing {
+    /// The arm was open and is no longer eligible for selection.
+    Closed,
+    /// The arm was already closed: an idempotent repeat that changed nothing.
+    AlreadyClosed,
 }
 
 /// Proof of one selection, to be redeemed by exactly one reward or abandon.

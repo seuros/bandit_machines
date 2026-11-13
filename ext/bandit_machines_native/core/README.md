@@ -15,12 +15,17 @@ Initial, unstable API. This is a policy core, not an experiment platform: it
 does not assign users, persist anything, or know what an arm means.
 
 ```rust
-use bandit_machines::{Bandit, Config, Draws, Ratio, Reason, Refusal, TieBreak};
+use bandit_machines::{
+    Bandit, Closing, Config, Draws, Opening, Ratio, Reason, Refusal, TieBreak,
+};
 
 let config = Config::new(100, 50, TieBreak::LowestIndex).expect("valid range");
 let mut bandit = Bandit::<4, 16>::new(config);
-bandit.open(0)?;
-bandit.open(1)?;
+assert_eq!(bandit.open(0)?, Opening::Opened);
+assert_eq!(bandit.open(1)?, Opening::Opened);
+// Asking again is honoured and changes nothing.
+assert_eq!(bandit.open(1)?, Opening::AlreadyOpen);
+assert_eq!(bandit.close(3)?, Closing::AlreadyClosed);
 
 let first = bandit.select_ucb1(0)?;
 assert_eq!((first.arm(), first.reason), (0, Reason::ColdStart));
@@ -40,8 +45,14 @@ assert_eq!(bandit.reward(second.ticket, 100), Err(Refusal::StaleTicket));
 
 **Eligibility.** Arms start closed: the bandit explores only what the caller
 opens, and selecting before that answers `NoOpenArm`. The Ruby gem starts the
-same way. `open` and `close` only change whether an
-arm can be selected; a closed arm keeps its statistics and still accepts the
+same way, and its `Config` requires the tie rule just as `Config::new` does.
+`open` and `close` only change whether an arm can be selected, and answer what
+they did: `Opening::Opened` / `Closing::Closed` when eligibility changed,
+`Opening::AlreadyOpen` / `Closing::AlreadyClosed` for an idempotent repeat that
+changed nothing (Ruby: `:opened`, `:closed`, `:already_open`,
+`:already_closed`). An arm past the capacity is refused with `UnknownArm`
+(Ruby: `:unknown_arm`). A
+closed arm keeps its statistics and still accepts the
 rewards of tickets issued before it closed. Whatever decides eligibility (a
 feature gate, a health check) lives with the caller.
 

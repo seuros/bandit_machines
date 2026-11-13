@@ -4,10 +4,10 @@ mod init;
 
 use std::{cell::RefCell, sync::Arc};
 
-use bandit_machines::{Bandit as Core, Config, Draws, Refusal, Selection, Ticket};
+use bandit_machines::{Bandit as Core, Refusal, Selection, Ticket};
 use magnus::{Error, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
 
-use convert::{Arm, Number, Small, ratio, reason, refusal, tie_break, tie_break_name};
+use convert::{Arm, Number, Small, refusal};
 
 const ARMS: usize = 16;
 const TICKETS: usize = 64;
@@ -23,12 +23,12 @@ impl Handle {
         self.ticket.arm()
     }
 
-    const fn serial(&self) -> u64 {
-        self.ticket.serial()
-    }
-
     const fn generation(&self) -> u64 {
         self.ticket.generation()
+    }
+
+    const fn serial(&self) -> u64 {
+        self.ticket.serial()
     }
 }
 
@@ -40,61 +40,58 @@ struct Bandit {
 
 impl Bandit {
     /// Every arm starts closed, as in the core.
-    fn new(ruby: &Ruby, max_reward: Small, prior: Small, tie: Value) -> Result<Self, Error> {
-        let config =
-            Config::new(max_reward.0, prior.0, tie_break(ruby, tie)?).ok_or_else(|| {
-                Error::new(
-                    ruby.exception_range_error(),
-                    "max_reward must be positive and prior at most max_reward",
-                )
-            })?;
+    fn new(ruby: &Ruby, config: Value) -> Result<Self, Error> {
+        let config = convert::config(ruby, config)?;
         Ok(Self {
             owner: Arc::new(()),
             core: RefCell::new(Core::new(config)),
         })
     }
 
-    fn selected(ruby: &Ruby, this: Obj<Self>, outcome: Result<Selection, Refusal>) -> Value {
+    fn config(ruby: &Ruby, this: &Self) -> Result<Value, Error> {
+        convert::config_value(ruby, this.core.borrow().config())
+    }
+
+    fn selected(
+        ruby: &Ruby,
+        this: Obj<Self>,
+        outcome: Result<Selection, Refusal>,
+    ) -> Result<Value, Error> {
         match outcome {
             Ok(selection) => {
                 let handle = ruby.obj_wrap(Handle {
                     owner: Arc::clone(&this.owner),
                     ticket: selection.ticket,
                 });
-                let reason = ruby.to_symbol(reason(selection.reason));
-                ruby.into_value((handle, selection.arm(), reason))
+                convert::selection_value(ruby, handle.as_value(), selection.reason)
             }
-            Err(refused) => refusal(ruby, refused),
+            Err(refused) => Ok(refusal(ruby, refused)),
         }
     }
 
     fn select_ucb1(ruby: &Ruby, this: Obj<Self>, pick: Number) -> Result<Value, Error> {
         this.check_frozen()?;
         let outcome = this.core.borrow_mut().select_ucb1(pick.0);
-        Ok(Self::selected(ruby, this, outcome))
+        Self::selected(ruby, this, outcome)
     }
 
     fn select_epsilon_greedy(
         ruby: &Ruby,
         this: Obj<Self>,
-        numerator: Small,
-        denominator: Small,
-        gate: Number,
-        pick: Number,
+        epsilon: Value,
+        draws: Value,
     ) -> Result<Value, Error> {
         this.check_frozen()?;
-        let epsilon = ratio(ruby, numerator, denominator)?;
-        let draws = Draws {
-            gate: gate.0,
-            pick: pick.0,
-        };
+        let epsilon = convert::ratio(ruby, epsilon)?;
+        let draws = convert::draws(ruby, draws)?;
         let outcome = this.core.borrow_mut().select_epsilon_greedy(epsilon, draws);
-        Ok(Self::selected(ruby, this, outcome))
+        Self::selected(ruby, this, outcome)
     }
 
-    fn settled(ruby: &Ruby, outcome: Result<(), Refusal>) -> Value {
+    /// The core answers `Ok(())`; Ruby names the honoured effect with `done`.
+    fn settled(ruby: &Ruby, outcome: Result<(), Refusal>, done: &'static str) -> Value {
         match outcome {
-            Ok(()) => ruby.qtrue().as_value(),
+            Ok(()) => ruby.to_symbol(done).as_value(),
             Err(refused) => refusal(ruby, refused),
         }
     }
@@ -110,7 +107,7 @@ impl Bandit {
             return Ok(refusal(ruby, Refusal::UnknownTicket));
         }
         let outcome = this.core.borrow_mut().reward(handle.ticket, reward.0);
-        Ok(Self::settled(ruby, outcome))
+        Ok(Self::settled(ruby, outcome, "rewarded"))
     }
 
     fn abandon(ruby: &Ruby, this: Obj<Self>, handle: Obj<Handle>) -> Result<Value, Error> {
@@ -119,7 +116,7 @@ impl Bandit {
             return Ok(refusal(ruby, Refusal::UnknownTicket));
         }
         let outcome = this.core.borrow_mut().abandon(handle.ticket);
-        Ok(Self::settled(ruby, outcome))
+        Ok(Self::settled(ruby, outcome, "abandoned"))
     }
 
     fn revoke_before(this: Obj<Self>, serial: Number) -> Result<usize, Error> {
@@ -134,7 +131,7 @@ impl Bandit {
         }
     }
 
-    fn reset(ruby: &Ruby, this: Obj<Self>, arm: Arm<ARMS>) -> Result<Value, Error> {
+    fn reset(ruby: &Ruby, this: Obj<Self>, arm: Arm) -> Result<Value, Error> {
         this.check_frozen()?;
         let outcome = this.core.borrow_mut().reset(arm.0);
         Ok(Self::voided(ruby, outcome))
@@ -146,61 +143,46 @@ impl Bandit {
         Ok(Self::voided(ruby, outcome))
     }
 
-    fn decay(
-        ruby: &Ruby,
-        this: Obj<Self>,
-        arm: Arm<ARMS>,
-        numerator: Small,
-        denominator: Small,
-    ) -> Result<Value, Error> {
+    fn decay(ruby: &Ruby, this: Obj<Self>, arm: Arm, keep: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let keep = ratio(ruby, numerator, denominator)?;
+        let keep = convert::ratio(ruby, keep)?;
         let outcome = this.core.borrow_mut().decay(arm.0, keep);
-        Ok(Self::settled(ruby, outcome))
+        Ok(Self::settled(ruby, outcome, "decayed"))
     }
 
-    fn decay_all(
-        ruby: &Ruby,
-        this: Obj<Self>,
-        numerator: Small,
-        denominator: Small,
-    ) -> Result<bool, Error> {
+    fn decay_all(ruby: &Ruby, this: Obj<Self>, keep: Value) -> Result<Symbol, Error> {
         this.check_frozen()?;
-        let keep = ratio(ruby, numerator, denominator)?;
+        let keep = convert::ratio(ruby, keep)?;
         this.core.borrow_mut().decay_all(keep);
-        Ok(true)
+        Ok(ruby.to_symbol("decayed"))
     }
 
-    fn open(ruby: &Ruby, this: Obj<Self>, arm: Arm<ARMS>) -> Result<Value, Error> {
+    fn open(ruby: &Ruby, this: Obj<Self>, arm: Arm) -> Result<Value, Error> {
         this.check_frozen()?;
         let outcome = this.core.borrow_mut().open(arm.0);
-        Ok(outcome.map_or_else(
-            |refused| refusal(ruby, refused),
-            |changed| ruby.into_value(changed),
-        ))
+        Ok(match outcome {
+            Ok(opening) => ruby.to_symbol(convert::opening(opening)).as_value(),
+            Err(refused) => refusal(ruby, refused),
+        })
     }
 
-    fn close(ruby: &Ruby, this: Obj<Self>, arm: Arm<ARMS>) -> Result<Value, Error> {
+    fn close(ruby: &Ruby, this: Obj<Self>, arm: Arm) -> Result<Value, Error> {
         this.check_frozen()?;
         let outcome = this.core.borrow_mut().close(arm.0);
-        Ok(outcome.map_or_else(
-            |refused| refusal(ruby, refused),
-            |changed| ruby.into_value(changed),
-        ))
+        Ok(match outcome {
+            Ok(closing) => ruby.to_symbol(convert::closing(closing)).as_value(),
+            Err(refused) => refusal(ruby, refused),
+        })
     }
 
-    fn stats(&self, arm: Arm<ARMS>) -> Option<(bool, u64, u64, u64, u64)> {
-        let stats = self.core.borrow().stats(arm.0)?;
-        Some((
-            stats.open,
-            stats.generation,
-            stats.rewarded,
-            stats.reward_sum,
-            stats.pending,
-        ))
+    fn stats(ruby: &Ruby, this: &Self, arm: Arm) -> Result<Option<Value>, Error> {
+        let stats = this.core.borrow().stats(arm.0);
+        stats
+            .map(|stats| convert::stats_value(ruby, stats))
+            .transpose()
     }
 
-    fn ucb1_index_q56(&self, arm: Arm<ARMS>) -> Option<u64> {
+    fn ucb1_index_q56(&self, arm: Arm) -> Option<u64> {
         self.core.borrow().ucb1_index_q56(arm.0)
     }
 
@@ -210,18 +192,6 @@ impl Bandit {
 
     fn next_serial(&self) -> u64 {
         self.core.borrow().next_serial()
-    }
-
-    fn max_reward(&self) -> u32 {
-        self.core.borrow().config().max_reward()
-    }
-
-    fn prior(&self) -> u32 {
-        self.core.borrow().config().prior()
-    }
-
-    fn tie_break(ruby: &Ruby, this: Obj<Self>) -> Symbol {
-        ruby.to_symbol(tie_break_name(this.core.borrow().config().tie_break()))
     }
 
     const fn arm_capacity() -> usize {
