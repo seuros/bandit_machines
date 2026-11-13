@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.2.0...bandit_machines/v0.3.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* see CONVENTIONS: one exhaustive Refusal per crate, Result from every mutator, honoured idempotent repeats, Ruby mirrors the core. No compatibility aliases. open/close return Opening/Closing; tie_break is required; Selection mirrors the core fields.
+
+### Features
+
+* name open and close outcomes, Config, Ratio and Draws as Ruby values, unknown arm answers :unknown_arm ([d94221c](https://github.com/seuros/bandit_machines/commit/d94221cbbf96f6a56638865e9f270a11f98c6077))
+
 ## [0.2.0](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.1.1...bandit_machines/v0.2.0) (2026-11-13)
 
 
