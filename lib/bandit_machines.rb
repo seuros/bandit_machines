@@ -11,8 +11,9 @@ module BanditMachines
   end
 
   class Bandit
-    def self.new(arms:, max_reward:, prior:, tie_break: :lowest_index)
-      _new(arms, max_reward, prior, tie_break)
+    # Every arm starts closed: open the ones to explore.
+    def self.new(max_reward:, prior:, tie_break: :lowest_index)
+      _new(max_reward, prior, tie_break)
     end
     private_class_method :_new
 

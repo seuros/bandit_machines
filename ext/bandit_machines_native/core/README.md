@@ -38,7 +38,9 @@ assert_eq!(bandit.reward(second.ticket, 100), Err(Refusal::StaleTicket));
 
 ## Contracts
 
-**Eligibility.** Arms start closed. `open` and `close` only change whether an
+**Eligibility.** Arms start closed: the bandit explores only what the caller
+opens, and selecting before that answers `NoOpenArm`. The Ruby gem starts the
+same way. `open` and `close` only change whether an
 arm can be selected; a closed arm keeps its statistics and still accepts the
 rewards of tickets issued before it closed. Whatever decides eligibility (a
 feature gate, a health check) lives with the caller.

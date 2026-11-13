@@ -14,7 +14,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     handle.define_method("generation", method!(Handle::generation, 0))?;
     let class = module.define_class("Bandit", ruby.class_object())?;
     class.undef_default_alloc_func();
-    class.define_singleton_method("_new", function!(Bandit::new, 4))?;
+    class.define_singleton_method("_new", function!(Bandit::new, 3))?;
     class.define_method("_select_ucb1", method!(Bandit::select_ucb1, 1))?;
     class.define_method(
         "_select_epsilon_greedy",

@@ -34,7 +34,7 @@ module BanditMachines
   end
 
   class Bandit
-    def self.new: (arms: Integer, max_reward: Integer, prior: Integer, ?tie_break: tie_break) -> Bandit
+    def self.new: (max_reward: Integer, prior: Integer, ?tie_break: tie_break) -> Bandit
     def select_ucb1: (?pick: Integer) -> (Selection | select_refusal)
     def select_epsilon_greedy: (numerator: Integer, denominator: Integer, gate: Integer, pick: Integer) -> (Selection | select_refusal)
     def reward: (Ticket ticket, Integer reward) -> (true | ticket_refusal | :reward_out_of_range | :saturated)

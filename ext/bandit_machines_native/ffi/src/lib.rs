@@ -39,27 +39,18 @@ struct Bandit {
 }
 
 impl Bandit {
-    fn new(
-        ruby: &Ruby,
-        arms: Number,
-        max_reward: Small,
-        prior: Small,
-        tie: Value,
-    ) -> Result<Self, Error> {
-        let range = |message| Error::new(ruby.exception_range_error(), message);
-        let config = Config::new(max_reward.0, prior.0, tie_break(ruby, tie)?)
-            .ok_or_else(|| range("max_reward must be positive and prior at most max_reward"))?;
-        let arms = usize::try_from(arms.0)
-            .ok()
-            .filter(|arms| *arms <= ARMS)
-            .ok_or_else(|| range("arms exceeds the compiled arm capacity"))?;
-        let mut core = Core::new(config);
-        for arm in 0..arms {
-            core.open(arm).map_err(|_| range("arm out of range"))?;
-        }
+    /// Every arm starts closed, as in the core.
+    fn new(ruby: &Ruby, max_reward: Small, prior: Small, tie: Value) -> Result<Self, Error> {
+        let config =
+            Config::new(max_reward.0, prior.0, tie_break(ruby, tie)?).ok_or_else(|| {
+                Error::new(
+                    ruby.exception_range_error(),
+                    "max_reward must be positive and prior at most max_reward",
+                )
+            })?;
         Ok(Self {
             owner: Arc::new(()),
-            core: RefCell::new(core),
+            core: RefCell::new(Core::new(config)),
         })
     }
 

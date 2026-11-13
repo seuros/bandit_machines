@@ -6,7 +6,9 @@ class BanditTest < Minitest::Test
   MAX = 2**64 - 1
 
   def build(arms: 3, max_reward: 10, prior: 5, **options)
-    BanditMachines::Bandit.new(arms:, max_reward:, prior:, **options)
+    bandit = BanditMachines::Bandit.new(max_reward:, prior:, **options)
+    arms.times { |arm| assert_equal true, bandit.open(arm) }
+    bandit
   end
 
   def feed(bandit, rewards)
@@ -22,6 +24,21 @@ class BanditTest < Minitest::Test
     assert_equal [10, 5, :draw], [bandit.max_reward, bandit.prior, bandit.tie_break]
     assert_equal :lowest_index, build.tie_break
     assert_equal [true, true, true, false], 4.times.map { |arm| bandit.stats(arm).open }
+  end
+
+  def test_a_new_bandit_has_every_arm_closed
+    bandit = BanditMachines::Bandit.new(max_reward: 10, prior: 5)
+    assert_equal [false] * 16, 16.times.map { |arm| bandit.stats(arm).open }
+    assert_equal :no_open_arm, bandit.select_ucb1
+    assert_equal :no_open_arm, bandit.select_epsilon_greedy(numerator: 1, denominator: 1, gate: 0, pick: 0)
+    assert_equal [0, 0], [bandit.outstanding, bandit.next_serial]
+    assert_equal [0, 0, 0], bandit.stats(0).to_h.values_at(:generation, :pending, :rewarded)
+    16.times { |arm| assert_nil bandit.ucb1_index_q56(arm) }
+    assert_equal false, bandit.close(7)
+    assert_equal true, bandit.open(7)
+    chosen = bandit.select_ucb1(pick: MAX)
+    assert_equal [7, :cold_start, 0], [chosen.arm, chosen.reason, chosen.ticket.serial]
+    assert_equal [7], 16.times.select { |arm| bandit.stats(arm).open }
   end
 
   def test_ucb1_sweeps_cold_arms_then_follows_the_index
@@ -99,7 +116,7 @@ class BanditTest < Minitest::Test
     assert_raises(TypeError) { BanditMachines::Ticket.allocate }
     assert_raises(TypeError) { BanditMachines::Bandit.allocate }
     assert_raises(TypeError) { ticket.dup }
-    assert_raises(NoMethodError) { BanditMachines::Bandit._new(1, 1, 0, :draw) }
+    assert_raises(NoMethodError) { BanditMachines::Bandit._new(1, 0, :draw) }
     assert_raises(NoMethodError) { a._stats(0) }
     assert_raises(TypeError) { a.reward(Object.new, 1) }
     a = nil
@@ -154,12 +171,14 @@ class BanditTest < Minitest::Test
       assert_raises(TypeError) { bandit.revoke_before(value) }
       assert_raises(TypeError) { bandit.decay(0, numerator: value, denominator: 1) }
       assert_raises(TypeError) { bandit.select_epsilon_greedy(numerator: 0, denominator: 1, gate: value, pick: 0) }
-      assert_raises(TypeError) { build(arms: value) }
+      assert_raises(TypeError) { bandit.open(value) }
       assert_raises(TypeError) { build(max_reward: value) }
+      assert_raises(TypeError) { build(prior: value) }
     end
     assert_raises(TypeError) { build(tie_break: 'draw') }
     assert_raises(ArgumentError) { build(tie_break: :coin) }
-    assert_raises(ArgumentError) { BanditMachines::Bandit.new(arms: 1) }
+    assert_raises(ArgumentError) { BanditMachines::Bandit.new(max_reward: 1) }
+    assert_raises(ArgumentError) { BanditMachines::Bandit.new(arms: 3, max_reward: 10, prior: 5) }
     [-1, 2**64].each { |n| assert_raises(RangeError) { bandit.select_ucb1(pick: n) } }
     [-1, 2**32].each { |n| assert_raises(RangeError) { bandit.reward(ticket, n) } }
     [-1, 16, 2**64].each do |arm|
@@ -170,7 +189,6 @@ class BanditTest < Minitest::Test
       assert_raises(RangeError) { bandit.ucb1_index_q56(arm) }
       assert_raises(RangeError) { bandit.decay(arm, numerator: 1, denominator: 1) }
     end
-    assert_raises(RangeError) { build(arms: 17) }
     assert_raises(RangeError) { build(max_reward: 0, prior: 0) }
     assert_raises(RangeError) { build(max_reward: 4, prior: 5) }
     assert_raises(RangeError) { bandit.decay_all(numerator: 2, denominator: 1) }

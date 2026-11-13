@@ -14,11 +14,12 @@ gem 'bandit_machines'
 
 ```ruby
 VARIANTS = %i[blue_button green_button orange_button].freeze
-bandit = BanditMachines::Bandit.new(arms: VARIANTS.size, max_reward: 1, prior: 0)
+bandit = BanditMachines::Bandit.new(max_reward: 1, prior: 0)
+VARIANTS.each_index { |arm| bandit.open(arm) }   # every arm starts closed
 
 def show_checkout(bandit, session)
   selection = bandit.select_ucb1
-  return render(VARIANTS.first) if selection.is_a?(Symbol) # :tickets_full and friends
+  return render(VARIANTS.first) if selection.is_a?(Symbol) # :no_open_arm, :tickets_full and friends
 
   session[:ticket] = selection.ticket
   render(VARIANTS[selection.arm])
@@ -29,7 +30,7 @@ def checkout_finished(bandit, session, purchased)
 end
 ```
 
-One bandit, two ways to select, one way to report. Arms are indices, rewards are Integers from `0` to `max_reward`, and any randomness is a number you pass in.
+One bandit, two ways to select, one way to report. A new bandit has every arm closed and selects nothing until you open some. Arms are indices, rewards are Integers from `0` to `max_reward`, and any randomness is a number you pass in.
 
 ## A Message to the Resistance
 
@@ -97,10 +98,24 @@ sequenceDiagram
 
 ## How the Bandit Works
 
+### Arms start closed
+
+```ruby
+bandit = BanditMachines::Bandit.new(max_reward: 10, prior: 5)
+bandit.stats(0).open   # => false
+bandit.select_ucb1     # => :no_open_arm
+
+bandit.open(0)         # => true
+bandit.open(1)         # => true
+```
+
+The bandit has 16 arms and a new one has all of them closed. It explores only what you open, so nothing is ever selected that you didn't name. Until you open an arm, both selections answer `:no_open_arm` and issue no ticket.
+
 ### Select with UCB1
 
 ```ruby
-bandit = BanditMachines::Bandit.new(arms: 2, max_reward: 10, prior: 5)
+bandit = BanditMachines::Bandit.new(max_reward: 10, prior: 5)
+2.times { |arm| bandit.open(arm) }
 
 first = bandit.select_ucb1
 first.arm      # => 0
@@ -159,7 +174,8 @@ bandit.abandon(selection.ticket)   # => true
 Tickets that are out count as tries. Ask three times before any reward comes back and you get three different cold arms, not the same one three times. An arm with tickets out and no reward yet competes using `prior` as its mean.
 
 ```ruby
-bandit = BanditMachines::Bandit.new(arms: 3, max_reward: 10, prior: 5)
+bandit = BanditMachines::Bandit.new(max_reward: 10, prior: 5)
+3.times { |arm| bandit.open(arm) }
 3.times.map { bandit.select_ucb1.arm }   # => [0, 1, 2]
 bandit.stats(0).pending                   # => 1
 bandit.stats(0).tries                     # => 1
@@ -170,7 +186,7 @@ bandit.stats(0).tries                     # => 1
 When two arms score exactly the same, `tie_break:` decides:
 
 ```ruby
-BanditMachines::Bandit.new(arms: 3, max_reward: 1, prior: 0, tie_break: :draw)
+BanditMachines::Bandit.new(max_reward: 1, prior: 0, tie_break: :draw)
 ```
 
 `:lowest_index` (the default), `:highest_index`, `:least_tried` (fewest tries, then lowest index), or `:draw`, which spreads the tie evenly using your `pick`.
@@ -178,7 +194,8 @@ BanditMachines::Bandit.new(arms: 3, max_reward: 1, prior: 0, tie_break: :draw)
 ### Reset
 
 ```ruby
-bandit = BanditMachines::Bandit.new(arms: 2, max_reward: 10, prior: 5)
+bandit = BanditMachines::Bandit.new(max_reward: 10, prior: 5)
+2.times { |arm| bandit.open(arm) }
 ticket = bandit.select_ucb1.ticket
 
 bandit.reset(0)              # => 1, one ticket voided
@@ -205,7 +222,7 @@ bandit.open(1)    # => true, and now it is again
 bandit.open(1)    # => false, it already was
 ```
 
-`arms: 3` opens arms 0, 1 and 2. A closed arm keeps its history and still accepts rewards for tickets issued before it closed. Wire this to whatever decides an option is available today.
+Opening is always explicit: the constructor opens nothing. A closed arm keeps its history and still accepts rewards for tickets issued before it closed. Wire this to whatever decides an option is available today.
 
 ### Revoke
 
@@ -223,7 +240,8 @@ Every ticket has a `serial`, counting up. The bandit has no clock, so expiring o
 BanditMachines::ARM_CAPACITY      # => 16
 BanditMachines::TICKET_CAPACITY   # => 64
 
-bandit = BanditMachines::Bandit.new(arms: 3, max_reward: 1, prior: 0)
+bandit = BanditMachines::Bandit.new(max_reward: 1, prior: 0)
+3.times { |arm| bandit.open(arm) }
 64.times { bandit.select_ucb1 }
 bandit.select_ucb1                # => :tickets_full
 ```
@@ -232,7 +250,7 @@ At most 64 selections can be waiting on a reward. Past that, selection is refuse
 
 ## The Rules of the Scout
 
-- **Everything is an Integer.** Arms are `0...16`. Rewards, `max_reward`, `prior` and ratio terms are `0..2**32-1`. Draws and serials are `0..2**64-1`. Floats, nil, and strings raise `TypeError`. Out of range raises `RangeError`. An unknown `tie_break` raises `ArgumentError`.
+- **Everything is an Integer.** Arms are `0...16`. Rewards, `max_reward`, `prior` and ratio terms are `0..2**32-1`. Draws and serials are `0..2**64-1`. Floats, nil, and strings raise `TypeError`. Out of range raises `RangeError`. An unknown `tie_break` or an unknown keyword raises `ArgumentError`.
 - **Tickets belong to one bandit.** A `Ticket` from one `Bandit` is refused by another with `:unknown_ticket`. Tickets can't be built or copied by hand.
 - **Refusals don't raise, and don't change anything.** `:no_open_arm`, `:tickets_full`, `:exhausted`, `:stale_ticket`, `:unknown_ticket`, `:reward_out_of_range` and `:saturated` are answers. Only malformed input raises.
 - **No hidden randomness, no hidden clock.** The same calls with the same draws give the same answers.
