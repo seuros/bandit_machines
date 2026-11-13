@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.3.0...bandit_machines/v0.4.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* handles are issued through periscope-machines. Every instance can be built with a scope; a handle from another scope is refused before any lookup; all handle kinds of an instance share one sequence; resumed restores the sequence after a restart. A ticket from another bandit answers UnknownTicket. Serials count from one; next_serial is an Option; revoke_before returns a Result.
+
+### Features
+
+* scope ticket serials through periscope-machines, add Bandit::resumed, issued and revoke_all ([1217d87](https://github.com/seuros/bandit_machines/commit/1217d879479a315a7407ed99d8b493283a347682))
+
 ## [0.3.0](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.2.0...bandit_machines/v0.3.0) (2026-11-13)
 
 
