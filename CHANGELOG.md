@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.6.1...bandit_machines/v0.7.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* bandit ticket refusals name the class received
+
+### Features
+
+* bandit ticket refusals name the class received ([d5cc30f](https://github.com/seuros/bandit_machines/commit/d5cc30ffe54634463c4496b138b0c6b9b243c874))
+
 ## [0.6.1](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.6.0...bandit_machines/v0.6.1) (2026-11-14)
 
 
