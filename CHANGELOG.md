@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.4.0...bandit_machines/v0.5.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* seal values, check exact classes natively, clone-then-keep selection
+
+### Features
+
+* seal values, check exact classes natively, clone-then-keep selection ([b120e24](https://github.com/seuros/bandit_machines/commit/b120e242333aeff876a2b3a6cf4a51550ad96277))
+
 ## [0.4.0](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.3.0...bandit_machines/v0.4.0) (2026-11-13)
 
 
