@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.5.0...bandit_machines/v0.6.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona-machines 0.2: symbols! tables, exact-class Ticket, exact Data fields
+
+### Features
+
+* adopt matryona-machines 0.2: symbols! tables, exact-class Ticket, exact Data fields ([6b58ea2](https://github.com/seuros/bandit_machines/commit/6b58ea2370184d1156158928cd3c0a3e6764df2a))
+
 ## [0.5.0](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.4.0...bandit_machines/v0.5.0) (2026-11-14)
 
 
