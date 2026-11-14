@@ -2,8 +2,9 @@
 use bandit_machines::{Ratio, math};
 use magnus::{Error, Ruby, Value, function, method, prelude::*};
 
-use crate::convert::{self, Number, Small};
+use crate::convert;
 use crate::{Bandit, Engine, Handle};
+use matryona_machines::ruby::integer;
 
 fn validate_config(ruby: &Ruby, this: Value) -> Result<(), Error> {
     convert::config(ruby, this).map(|_| ())
@@ -25,20 +26,24 @@ fn validate_draws(ruby: &Ruby, this: Value) -> Result<(), Error> {
     convert::draws(ruby, this).map(|_| ())
 }
 
-const fn log2_q56(value: Number) -> u64 {
-    math::log2_q56(value.0)
+fn log2_q56(value: Value) -> Result<u64, Error> {
+    integer(value, "value").map(math::log2_q56)
 }
 
-const fn ln_q56(value: Number) -> u64 {
-    math::ln_q56(value.0)
+fn ln_q56(value: Value) -> Result<u64, Error> {
+    integer(value, "value").map(math::ln_q56)
 }
 
-const fn bonus_q56(total: Number, tries: Number) -> u64 {
-    math::bonus_q56(total.0, tries.0)
+fn bonus_q56(total: Value, tries: Value) -> Result<u64, Error> {
+    Ok(math::bonus_q56(
+        integer(total, "total")?,
+        integer(tries, "tries")?,
+    ))
 }
 
-const fn mean_q56(sum: Number, count: Number, range: Small) -> u64 {
-    math::mean_q56(sum.0, count.0, range.0)
+fn mean_q56(sum: Value, count: Value, range: Value) -> Result<u64, Error> {
+    let (sum, count) = (integer(sum, "sum")?, integer(count, "count")?);
+    Ok(math::mean_q56(sum, count, integer(range, "range")?))
 }
 
 /// The checks of the `Data` values defined in Ruby, and the core's constants.
@@ -46,17 +51,21 @@ fn values(ruby: &Ruby) -> Result<(), Error> {
     let classes = convert::classes(ruby)?;
     classes
         .config
+        .get(ruby)
         .define_private_method("__validate", method!(validate_config, 0))?;
     classes
         .draws
+        .get(ruby)
         .define_private_method("__validate", method!(validate_draws, 0))?;
     classes
         .selection
+        .get(ruby)
         .define_private_method("__validate", method!(validate_selection, 0))?;
     classes
         .arm_stats
+        .get(ruby)
         .define_private_method("__validate", method!(validate_arm_stats, 0))?;
-    let ratio = classes.ratio;
+    let ratio = classes.ratio.get(ruby);
     ratio.define_private_method("__validate", method!(validate_ratio, 0))?;
     ratio.const_set("ZERO", convert::ratio_value(ruby, Ratio::ZERO)?)?;
     ratio.const_set("ONE", convert::ratio_value(ruby, Ratio::ONE)?)?;
@@ -82,7 +91,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     handle.define_method("generation", method!(Handle::generation, 0))?;
     handle.define_method("serial", method!(Handle::serial, 0))?;
     handle.define_method("scope", method!(Handle::scope, 0))?;
-    convert::resolve(ruby, module)?;
+    convert::resolve(ruby, module, handle)?;
     values(ruby)?;
 
     let class = module.define_class("Bandit", ruby.class_object())?;

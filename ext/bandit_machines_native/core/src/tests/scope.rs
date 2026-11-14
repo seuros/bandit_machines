@@ -1,6 +1,7 @@
 //! Tickets are scoped ids: only the bandit that issued one honours it.
 
 use super::*;
+use matryona_machines::testing::{refuses, unchanged};
 
 fn scoped_bandit<const A: usize, const T: usize>(scope: u16) -> Bandit<A, T> {
     opened(Bandit::with_scope(config(LOW), scope))
@@ -86,13 +87,13 @@ fn new_is_scope_zero_and_serials_count_from_one() {
 fn a_ticket_of_this_scope_that_was_never_issued_is_unknown() {
     let mut bandit = scoped_bandit::<1, 2>(3);
     let live = bandit.select_ucb1(0).unwrap().ticket;
-    let before = bandit.clone();
     for serial in [scoped(3, 2), scoped(3, 0), 0] {
         let unissued = Ticket { serial, ..live };
-        assert_eq!(bandit.reward(unissued, 1), Err(Refusal::UnknownTicket));
-        assert_eq!(bandit.abandon(unissued), Err(Refusal::UnknownTicket));
+        refuses(&mut bandit, Refusal::UnknownTicket, |r| {
+            r.reward(unissued, 1)
+        });
+        refuses(&mut bandit, Refusal::UnknownTicket, |r| r.abandon(unissued));
     }
-    assert_eq!(bandit, before);
     // A cut in this scope may lie past what was issued: it is not a ticket.
     assert_eq!(bandit.revoke_before(scoped(3, 9)), Ok(1));
 }
@@ -103,27 +104,20 @@ fn the_last_serial_of_a_scope_is_issued_and_then_selection_is_exhausted() {
     let last = bandit.select_ucb1(0).unwrap().ticket;
     assert_eq!((last.serial(), last.scope()), (scoped(3, SEQUENCE_MAX), 3));
     // A call refused for another reason spends no serial.
-    let before = bandit.clone();
-    assert_eq!(bandit.select_ucb1(0), Err(Refusal::TicketsFull));
-    assert_eq!(bandit, before);
+    refuses(&mut bandit, Refusal::TicketsFull, |r| r.select_ucb1(0));
     assert_eq!(bandit.reward(last, 1), Ok(()));
-    let before = bandit.clone();
     assert_eq!(bandit.next_serial(), None);
-    assert_eq!(bandit.select_ucb1(0), Err(Refusal::Exhausted));
-    assert_eq!(
-        bandit.select_epsilon_greedy(Ratio::ONE, draws(0, 0)),
-        Err(Refusal::Exhausted)
-    );
-    assert_eq!(bandit, before);
+    refuses(&mut bandit, Refusal::Exhausted, |r| r.select_ucb1(0));
+    refuses(&mut bandit, Refusal::Exhausted, |r| {
+        r.select_epsilon_greedy(Ratio::ONE, draws(0, 0))
+    });
     // The spent ticket stays unknown: its serial is never reissued.
     assert_eq!(bandit.reward(last, 1), Err(Refusal::UnknownTicket));
 
     // Resumed spent, it stays spent; past the last sequence is not a state.
     let mut spent = resumed_bandit::<1, 1>(3, SEQUENCE_MAX);
     assert_eq!((spent.scope(), spent.issued()), (3, SEQUENCE_MAX));
-    let before = spent.clone();
-    assert_eq!(spent.select_ucb1(0), Err(Refusal::Exhausted));
-    assert_eq!(spent, before);
+    refuses(&mut spent, Refusal::Exhausted, |r| r.select_ucb1(0));
     let config = spent.config();
     assert_eq!(Bandit::<1, 1>::resumed(config, 3, SEQUENCE_MAX + 1), None);
     assert_eq!(Bandit::<1, 1>::resumed(config, 3, u64::MAX), None);
@@ -137,16 +131,15 @@ fn revoke_all_revokes_every_ticket_and_keeps_what_was_learned() {
     let mut bandit = resumed_bandit::<2, 3>(3, SEQUENCE_MAX - 3);
     let spent = bandit.select_ucb1(0).unwrap().ticket;
     assert_eq!(bandit.reward(spent, 7), Ok(()));
+    assert_eq!(unchanged(&mut bandit, Bandit::revoke_all), 0);
     let before = bandit.clone();
-    assert_eq!(bandit.revoke_all(), 0);
-    assert_eq!(bandit, before);
 
     let held = [(); 2].map(|()| bandit.select_ucb1(0).unwrap().ticket);
     assert_eq!(held[1].serial(), scoped(3, SEQUENCE_MAX));
     assert_eq!(bandit.next_serial(), None);
-    let before = bandit.clone();
-    assert_eq!(bandit.revoke_before(u64::MAX), Err(Refusal::UnknownTicket));
-    assert_eq!(bandit, before);
+    refuses(&mut bandit, Refusal::UnknownTicket, |r| {
+        r.revoke_before(u64::MAX)
+    });
     // The highest cut of the scope still leaves its last ticket outstanding.
     assert_eq!(bandit.revoke_before(scoped(3, SEQUENCE_MAX)), Ok(1));
     assert_eq!(bandit.outstanding(), 1);
@@ -190,19 +183,18 @@ fn a_resumed_bandit_continues_its_scope_and_refuses_every_earlier_ticket() {
     assert_eq!(fresh.map(|t| t.serial()), [scoped(5, 5), scoped(5, 6)]);
     assert_eq!(fresh.map(|t| t.slot), pending.map(|t| t.slot));
 
-    let before = bandit.clone();
     for ticket in [spent, abandoned, pending[0], pending[1]] {
         assert!(fresh.iter().all(|t| t.serial() != ticket.serial()));
-        assert_eq!(bandit.reward(ticket, 1), Err(Refusal::UnknownTicket));
-        assert_eq!(bandit.abandon(ticket), Err(Refusal::UnknownTicket));
+        refuses(&mut bandit, Refusal::UnknownTicket, |b| b.reward(ticket, 1));
+        refuses(&mut bandit, Refusal::UnknownTicket, |b| b.abandon(ticket));
         // An earlier serial is a cut below everything issued since.
-        assert_eq!(bandit.revoke_before(ticket.serial()), Ok(0));
+        let cut = unchanged(&mut bandit, |b| b.revoke_before(ticket.serial()));
+        assert_eq!(cut, Ok(0));
     }
-    assert_eq!(bandit, before);
     // Generations restart too: a reset arm answers `StaleTicket` instead.
     assert_eq!(bandit.reset(pending[0].arm()), Ok(1));
-    let before = bandit.clone();
-    assert_eq!(bandit.reward(pending[0], 1), Err(Refusal::StaleTicket));
-    assert_eq!(bandit, before);
+    refuses(&mut bandit, Refusal::StaleTicket, |r| {
+        r.reward(pending[0], 1)
+    });
     assert_eq!(bandit.outstanding(), 1);
 }

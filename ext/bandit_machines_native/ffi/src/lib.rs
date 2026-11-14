@@ -6,8 +6,9 @@ use std::cell::RefCell;
 
 use bandit_machines::{Bandit as Core, Refusal, Selection, Ticket};
 use magnus::{Error, RClass, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
+use matryona_machines::ruby::{integer, keep, symbol};
 
-use convert::{Arm, Number, Scope, Small, refusal};
+use convert::refusal;
 
 /// The core as compiled for Ruby: 16 arms, 64 outstanding tickets. Everything
 /// else reads the core's `Engine::ARMS` and `Engine::TICKETS`.
@@ -50,16 +51,18 @@ impl Bandit {
         })
     }
 
-    fn with_scope(ruby: &Ruby, config: Value, scope: Scope) -> Result<Self, Error> {
+    fn with_scope(ruby: &Ruby, config: Value, scope: Value) -> Result<Self, Error> {
+        let scope = integer(scope, "scope")?;
         let config = convert::config(ruby, config)?;
         Ok(Self {
-            core: RefCell::new(Core::with_scope(config, scope.0)),
+            core: RefCell::new(Core::with_scope(config, scope)),
         })
     }
 
-    fn resumed(ruby: &Ruby, config: Value, scope: Scope, issued: Number) -> Result<Self, Error> {
+    fn resumed(ruby: &Ruby, config: Value, scope: Value, issued: Value) -> Result<Self, Error> {
+        let (scope, issued) = (integer(scope, "scope")?, integer(issued, "issued")?);
         let config = convert::config(ruby, config)?;
-        let core = Core::resumed(config, scope.0, issued.0).ok_or_else(|| {
+        let core = Core::resumed(config, scope, issued).ok_or_else(|| {
             Error::new(
                 ruby.exception_range_error(),
                 "issued is past the last sequence of a scope (2**48 - 1)",
@@ -106,12 +109,17 @@ impl Bandit {
         outcome.map_or_else(|refused| refusal(ruby, refused), honoured)
     }
 
-    fn select_ucb1(ruby: &Ruby, this: Obj<Self>, pick: Number) -> Result<Value, Error> {
+    fn select_ucb1(ruby: &Ruby, this: Obj<Self>, pick: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let class = convert::classes(ruby)?.selection;
-        Self::on_copy(ruby, this, |core| {
-            Self::selected(ruby, class, core.select_ucb1(pick.0))
-        })
+        let pick = integer(pick, "pick")?;
+        let class = convert::classes(ruby)?.selection.get(ruby);
+        keep(
+            ruby,
+            this,
+            &this.core,
+            |core| core.select_ucb1(pick),
+            |outcome| Self::selected(ruby, class, outcome),
+        )
     }
 
     fn select_epsilon_greedy(
@@ -123,63 +131,40 @@ impl Bandit {
         this.check_frozen()?;
         let epsilon = convert::ratio(ruby, epsilon)?;
         let draws = convert::draws(ruby, draws)?;
-        let class = convert::classes(ruby)?.selection;
-        Self::on_copy(ruby, this, |core| {
-            Self::selected(ruby, class, core.select_epsilon_greedy(epsilon, draws))
-        })
-    }
-
-    /// Runs `act`, which builds the `Selection`, on a copy of the bandit and
-    /// keeps the copy only once the answer exists. The answer is built
-    /// without running Ruby code; the receiver is still checked frozen and
-    /// unchanged right before the store (`FrozenError`, `RuntimeError`), and
-    /// in both cases nothing is applied. No borrow is held while `act` runs.
-    fn on_copy(
-        ruby: &Ruby,
-        this: Obj<Self>,
-        act: impl FnOnce(&mut Engine) -> Result<Value, Error>,
-    ) -> Result<Value, Error> {
-        this.check_frozen()?;
-        let before = this.core.borrow().clone();
-        let mut after = before.clone();
-        let answer = act(&mut after)?;
-        this.check_frozen()?;
-        let mut held = this.core.borrow_mut();
-        if *held != before {
-            return Err(Error::new(
-                ruby.exception_runtime_error(),
-                "the bandit changed while the answer was built; the call was not applied",
-            ));
-        }
-        *held = after;
-        Ok(answer)
+        let class = convert::classes(ruby)?.selection.get(ruby);
+        keep(
+            ruby,
+            this,
+            &this.core,
+            |core| core.select_epsilon_greedy(epsilon, draws),
+            |outcome| Self::selected(ruby, class, outcome),
+        )
     }
 
     /// The core answers `Ok(())`; Ruby names the honoured effect with `done`.
     fn settled(ruby: &Ruby, outcome: Result<(), Refusal>, done: &'static str) -> Value {
-        Self::answer(ruby, outcome, |()| ruby.to_symbol(done).as_value())
+        Self::answer(ruby, outcome, |()| symbol(ruby, done).as_value())
     }
 
-    fn reward(
-        ruby: &Ruby,
-        this: Obj<Self>,
-        handle: Obj<Handle>,
-        reward: Small,
-    ) -> Result<Value, Error> {
+    fn reward(ruby: &Ruby, this: Obj<Self>, handle: Value, reward: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().reward(handle.0, reward.0);
+        let handle = convert::ticket(ruby, handle)?;
+        let reward = integer(reward, "reward")?;
+        let outcome = this.core.borrow_mut().reward(handle.0, reward);
         Ok(Self::settled(ruby, outcome, "rewarded"))
     }
 
-    fn abandon(ruby: &Ruby, this: Obj<Self>, handle: Obj<Handle>) -> Result<Value, Error> {
+    fn abandon(ruby: &Ruby, this: Obj<Self>, handle: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let handle = convert::ticket(ruby, handle)?;
         let outcome = this.core.borrow_mut().abandon(handle.0);
         Ok(Self::settled(ruby, outcome, "abandoned"))
     }
 
-    fn revoke_before(ruby: &Ruby, this: Obj<Self>, serial: Number) -> Result<Value, Error> {
+    fn revoke_before(ruby: &Ruby, this: Obj<Self>, serial: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().revoke_before(serial.0);
+        let serial = integer(serial, "serial")?;
+        let outcome = this.core.borrow_mut().revoke_before(serial);
         Ok(Self::voided(ruby, outcome))
     }
 
@@ -192,9 +177,10 @@ impl Bandit {
         Self::answer(ruby, outcome, |voided| ruby.into_value(voided))
     }
 
-    fn reset(ruby: &Ruby, this: Obj<Self>, arm: Arm) -> Result<Value, Error> {
+    fn reset(ruby: &Ruby, this: Obj<Self>, arm: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().reset(arm.0);
+        let arm = integer(arm, "arm")?;
+        let outcome = this.core.borrow_mut().reset(arm);
         Ok(Self::voided(ruby, outcome))
     }
 
@@ -204,10 +190,11 @@ impl Bandit {
         Ok(Self::voided(ruby, outcome))
     }
 
-    fn decay(ruby: &Ruby, this: Obj<Self>, arm: Arm, keep: Value) -> Result<Value, Error> {
+    fn decay(ruby: &Ruby, this: Obj<Self>, arm: Value, keep: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let arm = integer(arm, "arm")?;
         let keep = convert::ratio(ruby, keep)?;
-        let outcome = this.core.borrow_mut().decay(arm.0, keep);
+        let outcome = this.core.borrow_mut().decay(arm, keep);
         Ok(Self::settled(ruby, outcome, "decayed"))
     }
 
@@ -215,34 +202,38 @@ impl Bandit {
         this.check_frozen()?;
         let keep = convert::ratio(ruby, keep)?;
         this.core.borrow_mut().decay_all(keep);
-        Ok(ruby.to_symbol("decayed"))
+        Ok(symbol(ruby, "decayed"))
     }
 
-    fn open(ruby: &Ruby, this: Obj<Self>, arm: Arm) -> Result<Value, Error> {
+    fn open(ruby: &Ruby, this: Obj<Self>, arm: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().open(arm.0);
+        let arm = integer(arm, "arm")?;
+        let outcome = this.core.borrow_mut().open(arm);
         Ok(Self::answer(ruby, outcome, |opening| {
-            ruby.to_symbol(convert::opening(opening)).as_value()
+            symbol(ruby, convert::opening(opening)).as_value()
         }))
     }
 
-    fn close(ruby: &Ruby, this: Obj<Self>, arm: Arm) -> Result<Value, Error> {
+    fn close(ruby: &Ruby, this: Obj<Self>, arm: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().close(arm.0);
+        let arm = integer(arm, "arm")?;
+        let outcome = this.core.borrow_mut().close(arm);
         Ok(Self::answer(ruby, outcome, |closing| {
-            ruby.to_symbol(convert::closing(closing)).as_value()
+            symbol(ruby, convert::closing(closing)).as_value()
         }))
     }
 
-    fn stats(ruby: &Ruby, this: &Self, arm: Arm) -> Result<Option<Value>, Error> {
-        let stats = this.core.borrow().stats(arm.0);
+    fn stats(ruby: &Ruby, this: &Self, arm: Value) -> Result<Option<Value>, Error> {
+        let arm = integer(arm, "arm")?;
+        let stats = this.core.borrow().stats(arm);
         stats
             .map(|stats| convert::stats_value(ruby, stats))
             .transpose()
     }
 
-    fn ucb1_index_q56(&self, arm: Arm) -> Option<u64> {
-        self.core.borrow().ucb1_index_q56(arm.0)
+    fn ucb1_index_q56(&self, arm: Value) -> Result<Option<u64>, Error> {
+        let arm = integer(arm, "arm")?;
+        Ok(self.core.borrow().ucb1_index_q56(arm))
     }
 
     fn outstanding(&self) -> usize {

@@ -103,6 +103,64 @@ class ValuesTest < Minitest::Test
     assert_equal 1, bandit.outstanding
   end
 
+  # Frozen is checked before any argument is read: a bad argument to a frozen
+  # bandit is FrozenError, not TypeError or RangeError.
+  def test_a_frozen_bandit_raises_before_reading_arguments
+    bandit = build.freeze
+    [-> { bandit.select_ucb1('0') }, -> { bandit.select_epsilon_greedy(0.5, nil) }, -> { bandit.reward(nil, 1) },
+     -> { bandit.abandon(1) }, -> { bandit.revoke_before(-1) }, -> { bandit.reset(1.5) },
+     -> { bandit.decay(:arm, nil) }, -> { bandit.decay_all([1, 2]) }, -> { bandit.open('1') },
+     -> { bandit.close(nil) }].each do |call|
+      assert_raises(FrozenError) { call.call }
+    end
+  end
+
+  # A singleton class opened on a genuine value does not change what it is.
+  def test_an_opened_singleton_class_is_still_the_gems_value
+    bandit = build
+    keep = ratio(1, 2).tap(&:singleton_class)
+    assert_equal :decayed, bandit.decay_all(keep)
+    chosen = bandit.select_epsilon_greedy(ratio(0, 1).clone.tap(&:singleton_class), draws(0, 0).tap(&:singleton_class))
+    ticket = chosen.ticket.tap(&:singleton_class)
+    assert_equal chosen, BanditMachines::Selection.new(ticket, chosen.reason)
+    config = bandit.config.tap(&:singleton_class)
+    assert_equal config, BanditMachines::Bandit.new(config).config
+  end
+
+  # Fields are read from the struct itself: a redefined reader answers
+  # nothing to the binding and never runs.
+  def test_a_redefined_reader_is_ignored
+    raising = -> { raise 'the binding ran a reader' }
+    bandit = build
+    readers(BanditMachines::Config, max_reward: -> { 0 }, prior: raising, tie_break: raising) do
+      readers(BanditMachines::Ratio, numerator: -> { 9 }, denominator: raising) do
+        readers(BanditMachines::Draws, gate: raising, pick: raising) do
+          assert_equal 10, BanditMachines::Bandit.new(config).config.to_h.fetch(:max_reward)
+          assert_equal :decayed, bandit.decay_all(ratio(1, 2))
+          assert_equal :cold_start, bandit.select_epsilon_greedy(ratio(0, 1), draws(0, 0)).reason
+        end
+      end
+    end
+  end
+
+  # A Ticket is read as exactly a Ticket. A subclass has no instance (the
+  # allocator is gone and only a bandit issues tickets), and anything else is
+  # a TypeError naming the Ticket.
+  def test_a_ticket_is_read_as_exactly_a_ticket
+    bandit = build
+    assert_raises(TypeError) { Class.new(BanditMachines::Ticket).allocate }
+    [-> { bandit.reward(bandit, 1) }, -> { bandit.abandon(Object.new) },
+     -> { BanditMachines::Selection.new(bandit, :explore) }].each do |call|
+      assert_equal 'ticket must be a BanditMachines::Ticket', assert_raises(TypeError, &call).message
+    end
+  end
+
+  # A tie_break outside the core's `TieBreak` names every one it accepts.
+  def test_an_unknown_tie_break_lists_the_accepted_ones
+    error = assert_raises(RangeError) { config(tie_break: :coin) }
+    assert_equal 'tie_break must be one of :lowest_index, :highest_index, :least_tried, :draw', error.message
+  end
+
   # After the core issued a ticket the binding builds the Selection natively:
   # no Ruby `initialize` runs, so one that raises cannot lose the ticket.
   def test_a_selection_is_built_without_running_ruby
@@ -122,5 +180,19 @@ class ValuesTest < Minitest::Test
     assert_predicate chosen, :frozen?
     assert_equal chosen, BanditMachines::Selection.new(chosen.ticket, :cold_start)
     assert_equal 2, bandit.outstanding
+  end
+
+  private
+
+  # Runs the block with each reader of `value` redefined, then restores it.
+  def readers(value, **bodies)
+    bodies.each_key { |name| value.alias_method(:"__original_#{name}", name) }
+    bodies.each { |name, body| value.define_method(name, &body) }
+    yield
+  ensure
+    bodies.each_key do |name|
+      value.alias_method(name, :"__original_#{name}")
+      value.remove_method(:"__original_#{name}")
+    end
   end
 end

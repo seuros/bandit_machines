@@ -11,6 +11,7 @@ mod model;
 mod reference;
 mod scope;
 
+use matryona_machines::testing::{refuses, unchanged};
 use periscope_machines::{SEQUENCE_MAX, scoped};
 
 use super::*;
@@ -81,14 +82,17 @@ fn repeated_open_and_close_are_honoured_and_change_nothing() {
     bandit.close(2).unwrap();
 
     let before = bandit.clone();
-    assert_eq!(bandit.open(0), Ok(Opening::AlreadyOpen));
-    assert_eq!(bandit, before);
-    assert_eq!(bandit.close(2), Ok(Closing::AlreadyClosed));
-    assert_eq!(bandit, before);
+    assert_eq!(
+        unchanged(&mut bandit, |b| b.open(0)),
+        Ok(Opening::AlreadyOpen)
+    );
+    assert_eq!(
+        unchanged(&mut bandit, |b| b.close(2)),
+        Ok(Closing::AlreadyClosed)
+    );
     // A refused call changes nothing either.
-    assert_eq!(bandit.open(3), Err(Refusal::UnknownArm));
-    assert_eq!(bandit.close(3), Err(Refusal::UnknownArm));
-    assert_eq!(bandit, before);
+    refuses(&mut bandit, Refusal::UnknownArm, |r| r.open(3));
+    refuses(&mut bandit, Refusal::UnknownArm, |r| r.close(3));
 
     // The first call is the one that changes eligibility, and only that.
     assert_eq!(bandit.close(0), Ok(Closing::Closed));
@@ -123,13 +127,10 @@ fn selection_needs_an_open_arm_and_a_free_ticket() {
     let mut full = open_bandit::<2, 2>(LOW);
     let first = full.select_ucb1(0).unwrap();
     full.select_ucb1(0).unwrap();
-    let before = full.clone();
-    assert_eq!(full.select_ucb1(0), Err(Refusal::TicketsFull));
-    assert_eq!(
-        full.select_epsilon_greedy(Ratio::ZERO, draws(0, 0)),
-        Err(Refusal::TicketsFull)
-    );
-    assert_eq!(full, before);
+    refuses(&mut full, Refusal::TicketsFull, |r| r.select_ucb1(0));
+    refuses(&mut full, Refusal::TicketsFull, |r| {
+        r.select_epsilon_greedy(Ratio::ZERO, draws(0, 0))
+    });
     assert_eq!(full.outstanding(), 2);
     full.abandon(first.ticket).unwrap();
     assert!(full.select_ucb1(0).is_ok());
@@ -281,10 +282,8 @@ fn late_rewards_for_a_reset_arm_are_refused() {
     let other = bandit.select_ucb1(0).unwrap().ticket;
     assert_eq!(bandit.reset(0), Ok(1));
     assert_eq!(bandit.reset(2), Err(Refusal::UnknownArm));
-    let before = bandit.clone();
-    assert_eq!(bandit.reward(stale, 10), Err(Refusal::StaleTicket));
-    assert_eq!(bandit.abandon(stale), Err(Refusal::StaleTicket));
-    assert_eq!(bandit, before);
+    refuses(&mut bandit, Refusal::StaleTicket, |r| r.reward(stale, 10));
+    refuses(&mut bandit, Refusal::StaleTicket, |r| r.abandon(stale));
     assert_eq!(bandit.stats(0).unwrap().generation, 1);
     assert_eq!(bandit.outstanding(), 1);
     // The reset arm is cold again and its replacement ticket is distinct.
@@ -347,9 +346,7 @@ fn decay_discounts_history_without_touching_tickets() {
     assert_eq!(bandit.reward(late, 10), Ok(()));
     assert_eq!(bandit.stats(0).unwrap().reward_sum, 23);
     assert_eq!(bandit.decay(2, Ratio::ONE), Err(Refusal::UnknownArm));
-    let before = bandit.clone();
-    bandit.decay_all(Ratio::ONE);
-    assert_eq!(bandit, before);
+    unchanged(&mut bandit, |b| b.decay_all(Ratio::ONE));
     bandit.decay_all(Ratio::ZERO);
     assert_eq!(bandit.stats(0).unwrap().tries(), 0);
     assert_eq!(bandit.stats(1).unwrap().tries(), 0);
@@ -361,9 +358,7 @@ fn u64_limits_refuse_without_mutating() {
     let mut bandit = open_bandit::<2, 2>(LOW);
     let ticket = bandit.select_ucb1(0).unwrap().ticket;
     bandit.force(0, 0, u64::MAX, 0);
-    let before = bandit.clone();
-    assert_eq!(bandit.reward(ticket, 1), Err(Refusal::Saturated));
-    assert_eq!(bandit, before);
+    refuses(&mut bandit, Refusal::Saturated, |r| r.reward(ticket, 1));
     bandit.force(0, 0, 5, u64::MAX);
     assert_eq!(bandit.reward(ticket, 1), Err(Refusal::Saturated));
     assert_eq!(bandit.reward(ticket, 0), Ok(()));
@@ -380,9 +375,7 @@ fn u64_limits_refuse_without_mutating() {
     // Generations run out: the reset is refused and nothing is voided.
     bandit.force(1, u64::MAX, 3, 3);
     let held = bandit.select_epsilon_greedy(Ratio::ZERO, draws(0, 0));
-    let before = bandit.clone();
-    assert_eq!(bandit.reset(1), Err(Refusal::Exhausted));
-    assert_eq!(bandit.reset_all(), Err(Refusal::Exhausted));
-    assert_eq!(bandit, before);
+    refuses(&mut bandit, Refusal::Exhausted, |r| r.reset(1));
+    refuses(&mut bandit, Refusal::Exhausted, Bandit::reset_all);
     assert_eq!(bandit.reset(0), Ok(usize::from(held.unwrap().arm() == 0)));
 }

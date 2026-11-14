@@ -4,6 +4,7 @@ extern crate std;
 
 use std::vec::Vec;
 
+use matryona_machines::testing::{XorShift64, refuses};
 use periscope_machines::{scoped, sequence_of};
 
 use super::model::{Model, ModelTicket, explores};
@@ -19,25 +20,10 @@ const PRIOR: u32 = 4;
 /// The core's documented UCB1 index error, plus `f64` rounding.
 const INDEX_SLACK: f64 = 1.0 / (1_u64 << 26) as f64 + 1e-12;
 
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn below(&mut self, bound: u64) -> u64 {
-        self.next() % bound
-    }
-}
-
 struct Run {
     core: Bandit<ARMS, TICKETS>,
     model: Model,
-    rng: Rng,
+    rng: XorShift64,
     scope: u16,
     /// Every ticket ever issued, spent or not, so stale ones get replayed.
     issued: Vec<(Ticket, ModelTicket)>,
@@ -49,7 +35,7 @@ impl Run {
         Self {
             core: Bandit::with_scope(config, scope),
             model: Model::new(ARMS, TICKETS, MAX_REWARD, PRIOR, tie),
-            rng: Rng(seed),
+            rng: XorShift64::new(seed),
             scope,
             issued: Vec::new(),
         }
@@ -105,8 +91,8 @@ impl Run {
         let numerator = self.rng.below(u64::from(denominator) + 1) as u32;
         let epsilon = Ratio::new(numerator, denominator).unwrap();
         let draws = Draws {
-            gate: self.rng.next(),
-            pick: self.rng.next(),
+            gate: self.rng.next_u64(),
+            pick: self.rng.next_u64(),
         };
         let before = self.core.clone();
         let outcome = self.core.select_epsilon_greedy(epsilon, draws);
@@ -124,7 +110,7 @@ impl Run {
     }
 
     fn select_ucb1(&mut self) {
-        let pick = self.rng.next();
+        let pick = self.rng.next_u64();
         let before = self.core.clone();
         let outcome = self.core.select_ucb1(pick);
         if self.refused(outcome, &before) {
@@ -216,13 +202,10 @@ impl Run {
             92 => assert_eq!(self.core.revoke_all(), self.model.revoke_all()),
             93 => {
                 let floor = self.rng.below(self.model.next_serial + 2);
-                let before = self.core.clone();
                 let foreign = scoped(self.foreign_scope(), floor);
-                assert_eq!(
-                    self.core.revoke_before(foreign),
-                    Err(Refusal::UnknownTicket)
-                );
-                assert_eq!(self.core, before);
+                refuses(&mut self.core, Refusal::UnknownTicket, |core| {
+                    core.revoke_before(foreign)
+                });
                 let revoked = self.model.revoke_before(floor);
                 assert_eq!(
                     self.core.revoke_before(scoped(self.scope, floor)),
