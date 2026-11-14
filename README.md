@@ -30,6 +30,13 @@ def checkout_finished(bandit, session, purchased)
 end
 ```
 
+`Bandit.new(config)` is scope zero. Two bandits built with `new` are the same scope and issue the same tickets, so one will count the other's rewards. Run more than one and give each its own scope:
+
+```ruby
+checkout = BanditMachines::Bandit.with_scope(BanditMachines::Config.new(1, 0, :lowest_index), 1)
+banner   = BanditMachines::Bandit.with_scope(BanditMachines::Config.new(1, 0, :lowest_index), 2)
+```
+
 One bandit, two ways to select, one way to report. A `Config` is the core's: `max_reward`, `prior`, `tie_break`, in that order, and `bandit.config` hands it back. A new bandit has every arm closed and selects nothing until you open some. Arms are indices, rewards are Integers from `0` to `max_reward`, and any randomness is a number you pass in.
 
 ## A Message to the Resistance
@@ -183,7 +190,7 @@ bandit.stats(0).tries                     # => 1
 
 ### Ties
 
-When two arms score exactly the same, the config's `tie_break` decides. It is required: there is no default, and leaving it out raises `ArgumentError`.
+When two arms score exactly the same, the config's `tie_break` decides. It is required: there is no default, and leaving it out raises Ruby's own `ArgumentError` for the missing argument. An unknown rule such as `:coin` raises `RangeError`.
 
 ```ruby
 BanditMachines::Config.new(1, 0, :draw)
@@ -278,8 +285,8 @@ A restarted bandit counts from one again, so a ticket that outlived the restart 
 ### Capacity
 
 ```ruby
-BanditMachines::ARM_CAPACITY      # => 16
-BanditMachines::TICKET_CAPACITY   # => 64
+BanditMachines::Bandit::ARMS      # => 16, the core's Bandit::ARMS
+BanditMachines::Bandit::TICKETS   # => 64, the core's Bandit::TICKETS
 
 bandit = BanditMachines::Bandit.new(BanditMachines::Config.new(1, 0, :lowest_index))
 3.times { |arm| bandit.open(arm) }
@@ -304,26 +311,29 @@ math.log2_q56(8)           # => 216172782113783808, exactly 3.0
 
 ## The Rules of the Scout
 
-- **Everything is an Integer.** Rewards, `max_reward`, `prior` and ratio terms are `0..2**32-1`. Draws, serials and arm indices are `0..2**64-1`. Floats, nil, and strings raise `TypeError`, and so does an Array or a Hash where a `Config`, `Ratio` or `Draws` belongs. Out of range raises `RangeError`, and so do a zero `max_reward`, a `prior` above it and a ratio above one, when the value is built, so an invalid one never exists. An unknown or missing `tie_break` raises `ArgumentError`.
+- **Everything is an Integer.** Rewards, `max_reward`, `prior` and ratio terms are `0..2**32-1`. Draws, serials and arm indices are `0..2**64-1`. Floats, nil, and strings raise `TypeError`, and so does an Array or a Hash where a `Config`, `Ratio` or `Draws` belongs. Out of range raises `RangeError`, and so do a zero `max_reward`, a `prior` above it, a ratio above one and an unknown `tie_break` or `reason` Symbol. Every value checks itself natively when it is built, by the gem or by hand: `Selection.new` needs a `Ticket` and one of the four reasons, `ArmStats.new` needs `true`/`false` and counts in `0..2**64-1`. An invalid one never exists. The value classes are sealed (subclassing raises `TypeError`, `allocate` is undefined); sealing stops accidents, not reflection, so a value the bandit reads must be an instance of exactly its class and its fields are checked again: a forged one raises `TypeError` or `RangeError` and never earns a refusal symbol. A missing argument is Ruby's own `ArgumentError`; the gem raises none.
 - **Ruby mirrors Rust.** `Config`, `Ratio`, `Draws`, `Selection` and `ArmStats` have the fields of the core's structs, in order, and are passed positionally where the core takes them. `tie_break` and `reason` are the core's variants in snake case. A `Ticket` answers `arm`, `generation`, `serial` and `scope`.
-- **Scopes.** A `Ticket` is only meaningful to the bandit that issued it. Give each bandit its own scope with `Bandit.with_scope(config, scope)`; the core cannot pick one. A `Ticket` or serial from a bandit in another scope is refused with `:unknown_ticket` (not `:stale_ticket`, which means the arm was reset). Two bandits in the same scope issue the same tickets. Tickets can't be built or copied by hand.
+- **Scopes.** A `Ticket` is only meaningful to the bandit that issued it. Two bandits built with `Bandit.new(config)` are both scope zero and alias: they issue the same tickets and honour each other's. Give each bandit its own scope with `Bandit.with_scope(config, scope)`; the core cannot pick one. A `Ticket` or serial from a bandit in another scope is refused with `:unknown_ticket` (not `:stale_ticket`, which means the arm was reset). Tickets can't be built or copied by hand.
 - **Restarts.** Resume from a saved count with `Bandit.resumed(config, scope, issued)`, or give each incarnation a new scope. `resumed` restores the serial sequence only; reopening arms and what they learned is yours.
+- **A call that raises changed nothing.** Every argument is checked before the core is asked, and every class was resolved once, when the extension loaded, so a `TypeError` or `RangeError` never leaves a ticket issued behind it. A selection is decided on a copy of the bandit, and the `Selection` built natively from that answer, without running any Ruby code; the copy is kept only once it exists.
 - **Refusals don't raise, and don't change anything.** `:unknown_arm`, `:no_open_arm`, `:tickets_full`, `:exhausted`, `:stale_ticket`, `:unknown_ticket`, `:reward_out_of_range` and `:saturated` are answers. Only malformed input raises.
 - **Every answer, by method.**
 
-  | Method | Honoured | Refused |
-  | --- | --- | --- |
-  | `select_ucb1(pick)`, `select_epsilon_greedy(epsilon, draws)` | a `Selection` | `:no_open_arm`, `:tickets_full`, `:exhausted` |
-  | `reward(ticket, reward)` | `:rewarded` | `:stale_ticket`, `:unknown_ticket`, `:reward_out_of_range`, `:saturated` |
-  | `abandon(ticket)` | `:abandoned` | `:stale_ticket`, `:unknown_ticket` |
-  | `revoke_before(serial)` | the number of tickets revoked (Integer) | `:unknown_ticket` |
-  | `revoke_all` | the number of tickets revoked (Integer) | none |
-  | `reset(arm)` | the number of tickets voided (Integer) | `:unknown_arm`, `:exhausted` |
-  | `reset_all` | the number of tickets voided (Integer) | `:exhausted` |
-  | `decay(arm, keep)` | `:decayed` | `:unknown_arm` |
-  | `decay_all(keep)` | `:decayed` | none |
-  | `open(arm)` | `:opened`, `:already_open` | `:unknown_arm` |
-  | `close(arm)` | `:closed`, `:already_closed` | `:unknown_arm` |
+  | Method | Honoured | Refused | Records the clock |
+  | --- | --- | --- | --- |
+  | `select_ucb1(pick)`, `select_epsilon_greedy(epsilon, draws)` | a `Selection` | `:no_open_arm`, `:tickets_full`, `:exhausted` | no |
+  | `reward(ticket, reward)` | `:rewarded` | `:stale_ticket`, `:unknown_ticket`, `:reward_out_of_range`, `:saturated` | no |
+  | `abandon(ticket)` | `:abandoned` | `:stale_ticket`, `:unknown_ticket` | no |
+  | `revoke_before(serial)` | the number of tickets revoked (Integer) | `:unknown_ticket` | no |
+  | `revoke_all` | the number of tickets revoked (Integer) | none | no |
+  | `reset(arm)` | the number of tickets voided (Integer) | `:unknown_arm`, `:exhausted` | no |
+  | `reset_all` | the number of tickets voided (Integer) | `:exhausted` | no |
+  | `decay(arm, keep)` | `:decayed` | `:unknown_arm` | no |
+  | `decay_all(keep)` | `:decayed` | none | no |
+  | `open(arm)` | `:opened`, `:already_open` | `:unknown_arm` | no |
+  | `close(arm)` | `:closed`, `:already_closed` | `:unknown_arm` | no |
+
+  No answer records a clock: the bandit has none, and nothing it answers depends on the time.
 
   `stats(arm)` and `ucb1_index_q56(arm)` answer `nil` for an index that names no arm. Those eight symbols are every variant of the core's `Refusal`; there is no catch-all symbol. Two of them cannot be reached in practice: `:exhausted` needs `2**64-1` selections or resets of one arm, and `:saturated` needs an arm's reward count or sum to pass `2**64-1`.
 - **No hidden randomness, no hidden clock.** The same calls with the same draws give the same answers.

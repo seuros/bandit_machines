@@ -17,22 +17,26 @@ use super::*;
 
 const LOW: TieBreak = TieBreak::LowestIndex;
 
-fn open_bandit<const A: usize, const T: usize>(tie: TieBreak) -> Bandit<A, T> {
-    let mut bandit = Bandit::new(Config::new(10, 5, tie).unwrap());
+/// Rewards in `0..=10`, prior 5: the configuration every fixture uses.
+fn config(tie: TieBreak) -> Config {
+    Config::new(10, 5, tie).unwrap()
+}
+
+/// `bandit` with every arm opened.
+fn opened<const A: usize, const T: usize>(mut bandit: Bandit<A, T>) -> Bandit<A, T> {
     for arm in 0..A {
         assert_eq!(bandit.open(arm), Ok(Opening::Opened));
     }
     bandit
 }
 
+fn open_bandit<const A: usize, const T: usize>(tie: TieBreak) -> Bandit<A, T> {
+    opened(Bandit::new(config(tie)))
+}
+
 /// A bandit resumed after `issued` serials, every arm open.
 fn resumed_bandit<const A: usize, const T: usize>(scope: u16, issued: u64) -> Bandit<A, T> {
-    let config = Config::new(10, 5, LOW).unwrap();
-    let mut bandit = Bandit::resumed(config, scope, issued).unwrap();
-    for arm in 0..A {
-        assert_eq!(bandit.open(arm), Ok(Opening::Opened));
-    }
-    bandit
+    opened(Bandit::resumed(config(LOW), scope, issued).unwrap())
 }
 
 const fn draws(gate: u64, pick: u64) -> Draws {
@@ -91,7 +95,18 @@ fn repeated_open_and_close_are_honoured_and_change_nothing() {
     assert_ne!(bandit, before);
     assert_eq!(bandit.open(0), Ok(Opening::Opened));
     assert_eq!(bandit, before);
-    assert_eq!(bandit.reward(pending.ticket, 1), Ok(()));
+
+    // Closing is eligibility only: the arm keeps its statistics and still
+    // takes the late reward, and selection passes it by.
+    bandit.close(pending.arm()).unwrap();
+    let kept = bandit.stats(pending.arm()).unwrap();
+    assert_eq!(bandit.reward(pending.ticket, 7), Ok(()));
+    let stats = bandit.stats(pending.arm()).unwrap();
+    assert_eq!(
+        (stats.open, stats.rewarded, stats.reward_sum),
+        (false, kept.rewarded + 1, kept.reward_sum + 7)
+    );
+    assert_ne!(bandit.select_ucb1(0).unwrap().arm(), pending.arm());
 }
 
 #[test]
@@ -102,13 +117,8 @@ fn selection_needs_an_open_arm_and_a_free_ticket() {
         closed.select_epsilon_greedy(Ratio::ONE, draws(0, 0)),
         Err(Refusal::NoOpenArm)
     );
-    assert_eq!(closed.open(2), Err(Refusal::UnknownArm));
-    assert_eq!(closed.close(2), Err(Refusal::UnknownArm));
     assert_eq!(closed.open(1), Ok(Opening::Opened));
-    assert_eq!(closed.open(1), Ok(Opening::AlreadyOpen));
     assert_eq!(closed.select_ucb1(0).unwrap().arm(), 1);
-    assert_eq!(closed.close(1), Ok(Closing::Closed));
-    assert_eq!(closed.close(1), Ok(Closing::AlreadyClosed));
 
     let mut full = open_bandit::<2, 2>(LOW);
     let first = full.select_ucb1(0).unwrap();
@@ -297,20 +307,6 @@ fn late_rewards_for_a_reset_arm_are_refused() {
 }
 
 #[test]
-fn closing_keeps_statistics_and_accepts_the_late_reward() {
-    let mut bandit = open_bandit::<2, 2>(LOW);
-    let ticket = bandit.select_ucb1(0).unwrap().ticket;
-    bandit.close(0).unwrap();
-    assert_eq!(bandit.reward(ticket, 7), Ok(()));
-    let stats = bandit.stats(0).unwrap();
-    assert_eq!(
-        (stats.open, stats.rewarded, stats.reward_sum),
-        (false, 1, 7)
-    );
-    assert_eq!(bandit.select_ucb1(0).unwrap().arm(), 1);
-}
-
-#[test]
 fn revoke_and_reset_all_void_tickets_and_free_their_slots() {
     let mut bandit = open_bandit::<2, 3>(LOW);
     let tickets = [(); 3].map(|()| bandit.select_ucb1(0).unwrap().ticket);
@@ -389,17 +385,4 @@ fn u64_limits_refuse_without_mutating() {
     assert_eq!(bandit.reset_all(), Err(Refusal::Exhausted));
     assert_eq!(bandit, before);
     assert_eq!(bandit.reset(0), Ok(usize::from(held.unwrap().arm() == 0)));
-
-    // Serials run out: selection is refused for good.
-    let mut bandit = resumed_bandit::<2, 2>(0, SEQUENCE_MAX - 1);
-    assert_eq!(bandit.next_serial(), Some(SEQUENCE_MAX));
-    assert_eq!(bandit.select_ucb1(0).unwrap().ticket.serial(), SEQUENCE_MAX);
-    assert_eq!(bandit.next_serial(), None);
-    let before = bandit.clone();
-    assert_eq!(bandit.select_ucb1(0), Err(Refusal::Exhausted));
-    assert_eq!(
-        bandit.select_epsilon_greedy(Ratio::ONE, draws(0, 0)),
-        Err(Refusal::Exhausted)
-    );
-    assert_eq!(bandit, before);
 }

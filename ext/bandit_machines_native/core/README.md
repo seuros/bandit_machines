@@ -39,7 +39,8 @@ assert_eq!((second.arm(), second.reason), (1, Reason::ColdStart));
 bandit.reset(1)?;
 assert_eq!(bandit.reward(second.ticket, 100), Err(Refusal::StaleTicket));
 
-// Another bandit, another scope: it refuses a ticket it did not issue.
+// Another bandit, another scope: it refuses a ticket it did not issue. Two
+// bandits built with `new` are both scope zero and would alias.
 let mut other = Bandit::<4, 16>::with_scope(config, 7);
 other.open(0)?;
 let theirs = other.select_ucb1(0)?.ticket;
@@ -112,7 +113,10 @@ not share a scope. `reward` and `abandon` answer `UnknownTicket` for a ticket
 the bandit did not issue, before looking at any arm or slot, and
 `revoke_before` answers it for a serial of another scope. Give each bandit its
 own scope: the core reads no clock and no random source, so it cannot pick one,
-and two bandits left in the same scope issue the same tickets.
+and two bandits left in the same scope (two built with `new`, say) issue the
+same tickets and honour each other's.
+
+**No clock.** The bandit reads and records no time; no answer depends on one.
 
 **Restarts.** A fresh bandit counts from one again, so a ticket that outlived a
 restart could redeem a new selection. Save `Bandit::issued` and rebuild with
@@ -132,6 +136,16 @@ slots are out, `Exhausted` when the scope's 2^48 - 1 serials or an arm's
 generations run out,
 `Saturated` when an arm's `u64` count or sum would overflow (decay, then retry
 the same ticket), `RewardOutOfRange` above `max_reward`.
+
+**No panics.** Every arm and slot lookup is checked and no counter is
+subtracted unchecked; how many tickets are outstanding is counted from the
+slots, not kept beside them. Four arms are ruled out by the bandit's own
+invariants yet demanded by the types: a free slot or chosen arm that is not
+there when a ticket is issued, a drawn tie position past `usize`, and an
+outstanding ticket its arm does not count. Each is a `debug_assert!` that
+fails in tests; a release build answers `TicketsFull`, `NoOpenArm` (the first
+two) or `UnknownTicket` with nothing changed (the serial is issued last). Voiding cannot refuse, so there a broken count is left as it
+is and the slot is still freed.
 
 The regret bound of UCB1 assumes stationary rewards and immediate feedback.
 Delays, resets and decay are operational tools; they void that proof, not the

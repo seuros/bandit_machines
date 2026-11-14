@@ -30,18 +30,6 @@ class ScopeTest < Minitest::Test
     assert_equal :rewarded, a.reward(from_a, 1)
   end
 
-  # The core cannot pick a scope: two bandits left in scope zero issue the same
-  # tickets, and one honours the other's.
-  def test_bandits_left_in_the_same_scope_still_alias
-    a = build
-    b = build
-    ticket = a.select_ucb1(0).ticket
-    b.select_ucb1(0)
-    assert_equal [0, 0, 0, 1], [a.scope, b.scope, ticket.scope, ticket.serial]
-    assert_equal :rewarded, b.reward(ticket, 1)
-    assert_equal 0, b.outstanding
-  end
-
   def test_with_scope_takes_a_config_and_an_integer_scope
     bandit = BanditMachines::Bandit.with_scope(config, 65_535)
     assert_equal [65_535, config, (65_535 << 48) | 1], [bandit.scope, bandit.config, bandit.next_serial]
@@ -52,6 +40,16 @@ class ScopeTest < Minitest::Test
     end
     [-1, 65_536, 2**64].each { |scope| assert_raises(RangeError) { BanditMachines::Bandit.with_scope(config, scope) } }
     assert_raises(ArgumentError) { BanditMachines::Bandit.with_scope(config) }
+
+    # The core cannot pick a scope: two bandits left in scope zero issue the
+    # same tickets, and one honours the other's.
+    a = build
+    b = build
+    ticket = a.select_ucb1(0).ticket
+    b.select_ucb1(0)
+    assert_equal [0, 0, 0, 1], [a.scope, b.scope, ticket.scope, ticket.serial]
+    assert_equal :rewarded, b.reward(ticket, 1)
+    assert_equal 0, b.outstanding
   end
 
   # A fresh bandit counts from one again, so a ticket that outlived a restart

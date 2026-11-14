@@ -5,12 +5,13 @@ mod init;
 use std::cell::RefCell;
 
 use bandit_machines::{Bandit as Core, Refusal, Selection, Ticket};
-use magnus::{Error, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
+use magnus::{Error, RClass, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
 
 use convert::{Arm, Number, Scope, Small, refusal};
 
-const ARMS: usize = 16;
-const TICKETS: usize = 64;
+/// The core as compiled for Ruby: 16 arms, 64 outstanding tickets. Everything
+/// else reads the core's `Engine::ARMS` and `Engine::TICKETS`.
+type Engine = Core<16, 64>;
 
 /// `BanditMachines::Ticket`: the core's `Ticket`. Its serial carries the
 /// scope of the bandit that issued it; the core refuses it anywhere else.
@@ -37,7 +38,7 @@ impl Handle {
 
 #[magnus::wrap(class = "BanditMachines::Bandit", free_immediately, size)]
 struct Bandit {
-    core: RefCell<Core<ARMS, TICKETS>>,
+    core: RefCell<Engine>,
 }
 
 impl Bandit {
@@ -81,20 +82,36 @@ impl Bandit {
         convert::config_value(ruby, this.core.borrow().config())
     }
 
-    fn selected(ruby: &Ruby, outcome: Result<Selection, Refusal>) -> Result<Value, Error> {
+    /// `class` is `Selection`, resolved at init.
+    fn selected(
+        ruby: &Ruby,
+        class: RClass,
+        outcome: Result<Selection, Refusal>,
+    ) -> Result<Value, Error> {
         match outcome {
             Ok(selection) => {
                 let handle = ruby.obj_wrap(Handle(selection.ticket));
-                convert::selection_value(ruby, handle.as_value(), selection.reason)
+                convert::selection_value(ruby, class, handle.as_value(), selection.reason)
             }
             Err(refused) => Ok(refusal(ruby, refused)),
         }
     }
 
+    /// An honoured answer as `honoured` builds it, or the refusal's symbol.
+    fn answer<T>(
+        ruby: &Ruby,
+        outcome: Result<T, Refusal>,
+        honoured: impl FnOnce(T) -> Value,
+    ) -> Value {
+        outcome.map_or_else(|refused| refusal(ruby, refused), honoured)
+    }
+
     fn select_ucb1(ruby: &Ruby, this: Obj<Self>, pick: Number) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().select_ucb1(pick.0);
-        Self::selected(ruby, outcome)
+        let class = convert::classes(ruby)?.selection;
+        Self::on_copy(ruby, this, |core| {
+            Self::selected(ruby, class, core.select_ucb1(pick.0))
+        })
     }
 
     fn select_epsilon_greedy(
@@ -106,16 +123,41 @@ impl Bandit {
         this.check_frozen()?;
         let epsilon = convert::ratio(ruby, epsilon)?;
         let draws = convert::draws(ruby, draws)?;
-        let outcome = this.core.borrow_mut().select_epsilon_greedy(epsilon, draws);
-        Self::selected(ruby, outcome)
+        let class = convert::classes(ruby)?.selection;
+        Self::on_copy(ruby, this, |core| {
+            Self::selected(ruby, class, core.select_epsilon_greedy(epsilon, draws))
+        })
+    }
+
+    /// Runs `act`, which builds the `Selection`, on a copy of the bandit and
+    /// keeps the copy only once the answer exists. The answer is built
+    /// without running Ruby code; the receiver is still checked frozen and
+    /// unchanged right before the store (`FrozenError`, `RuntimeError`), and
+    /// in both cases nothing is applied. No borrow is held while `act` runs.
+    fn on_copy(
+        ruby: &Ruby,
+        this: Obj<Self>,
+        act: impl FnOnce(&mut Engine) -> Result<Value, Error>,
+    ) -> Result<Value, Error> {
+        this.check_frozen()?;
+        let before = this.core.borrow().clone();
+        let mut after = before.clone();
+        let answer = act(&mut after)?;
+        this.check_frozen()?;
+        let mut held = this.core.borrow_mut();
+        if *held != before {
+            return Err(Error::new(
+                ruby.exception_runtime_error(),
+                "the bandit changed while the answer was built; the call was not applied",
+            ));
+        }
+        *held = after;
+        Ok(answer)
     }
 
     /// The core answers `Ok(())`; Ruby names the honoured effect with `done`.
     fn settled(ruby: &Ruby, outcome: Result<(), Refusal>, done: &'static str) -> Value {
-        match outcome {
-            Ok(()) => ruby.to_symbol(done).as_value(),
-            Err(refused) => refusal(ruby, refused),
-        }
+        Self::answer(ruby, outcome, |()| ruby.to_symbol(done).as_value())
     }
 
     fn reward(
@@ -147,10 +189,7 @@ impl Bandit {
     }
 
     fn voided(ruby: &Ruby, outcome: Result<usize, Refusal>) -> Value {
-        match outcome {
-            Ok(voided) => ruby.into_value(voided),
-            Err(refused) => refusal(ruby, refused),
-        }
+        Self::answer(ruby, outcome, |voided| ruby.into_value(voided))
     }
 
     fn reset(ruby: &Ruby, this: Obj<Self>, arm: Arm) -> Result<Value, Error> {
@@ -182,19 +221,17 @@ impl Bandit {
     fn open(ruby: &Ruby, this: Obj<Self>, arm: Arm) -> Result<Value, Error> {
         this.check_frozen()?;
         let outcome = this.core.borrow_mut().open(arm.0);
-        Ok(match outcome {
-            Ok(opening) => ruby.to_symbol(convert::opening(opening)).as_value(),
-            Err(refused) => refusal(ruby, refused),
-        })
+        Ok(Self::answer(ruby, outcome, |opening| {
+            ruby.to_symbol(convert::opening(opening)).as_value()
+        }))
     }
 
     fn close(ruby: &Ruby, this: Obj<Self>, arm: Arm) -> Result<Value, Error> {
         this.check_frozen()?;
         let outcome = this.core.borrow_mut().close(arm.0);
-        Ok(match outcome {
-            Ok(closing) => ruby.to_symbol(convert::closing(closing)).as_value(),
-            Err(refused) => refusal(ruby, refused),
-        })
+        Ok(Self::answer(ruby, outcome, |closing| {
+            ruby.to_symbol(convert::closing(closing)).as_value()
+        }))
     }
 
     fn stats(ruby: &Ruby, this: &Self, arm: Arm) -> Result<Option<Value>, Error> {
@@ -214,13 +251,5 @@ impl Bandit {
 
     fn next_serial(&self) -> Option<u64> {
         self.core.borrow().next_serial()
-    }
-
-    const fn arm_capacity() -> usize {
-        ARMS
-    }
-
-    const fn ticket_capacity() -> usize {
-        TICKETS
     }
 }

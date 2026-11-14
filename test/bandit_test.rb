@@ -6,10 +6,7 @@ class BanditTest < Minitest::Test
 
   def test_capacity_constants_and_configuration
     bandit = build(tie_break: :draw)
-    assert_equal 16, BanditMachines::ARM_CAPACITY
-    assert_equal 64, BanditMachines::TICKET_CAPACITY
-    assert_equal 16, bandit.arm_capacity
-    assert_equal 64, bandit.ticket_capacity
+    assert_equal [16, 64], [BanditMachines::Bandit::ARMS, BanditMachines::Bandit::TICKETS]
     assert_equal BanditMachines::Config.new(max_reward: 10, prior: 5, tie_break: :draw), bandit.config
     assert_equal %i[max_reward prior tie_break], BanditMachines::Config.members
     assert_equal %i[lowest_index highest_index least_tried],
@@ -39,7 +36,7 @@ class BanditTest < Minitest::Test
     assert_raises(RangeError) { config(max_reward: 2**32) }
     assert_raises(TypeError) { config(tie_break: 'draw') }
     assert_raises(TypeError) { config(tie_break: nil) }
-    assert_raises(ArgumentError) { config(tie_break: :coin) }
+    assert_raises(RangeError) { config(tie_break: :coin) }
     assert_raises(ArgumentError) { BanditMachines::Config.new(10, 5) }
     assert_raises(ArgumentError) { BanditMachines::Config.new(arms: 3, max_reward: 10, prior: 5, tie_break: :draw) }
     assert_raises(NoMethodError) { ratio(1, 2).__validate }
@@ -63,20 +60,6 @@ class BanditTest < Minitest::Test
     assert_equal math.mean_q56(10, 1, 10) + math.bonus_q56(2, 1), bandit.ucb1_index_q56(1)
   end
 
-  def test_an_index_that_names_no_arm_is_answered_not_raised
-    bandit = build
-    [16, 17, MAX].each do |arm|
-      assert_equal :unknown_arm, bandit.open(arm)
-      assert_equal :unknown_arm, bandit.close(arm)
-      assert_equal :unknown_arm, bandit.reset(arm)
-      assert_equal :unknown_arm, bandit.decay(arm, ratio(1, 2))
-      assert_nil bandit.stats(arm)
-      assert_nil bandit.ucb1_index_q56(arm)
-    end
-    assert_equal [0, 1], [bandit.outstanding, bandit.next_serial]
-    assert_equal [0] * 16, 16.times.map { bandit.stats(it).generation }
-  end
-
   def test_a_new_bandit_has_every_arm_closed
     bandit = BanditMachines::Bandit.new(config)
     assert_equal [false] * 16, 16.times.map { |arm| bandit.stats(arm).open }
@@ -90,6 +73,20 @@ class BanditTest < Minitest::Test
     chosen = bandit.select_ucb1(MAX)
     assert_equal [7, :cold_start, 1], [chosen.arm, chosen.reason, chosen.ticket.serial]
     assert_equal [7], 16.times.select { |arm| bandit.stats(arm).open }
+  end
+
+  def test_an_index_that_names_no_arm_is_answered_not_raised
+    bandit = build
+    [16, 17, MAX].each do |arm|
+      assert_equal :unknown_arm, bandit.open(arm)
+      assert_equal :unknown_arm, bandit.close(arm)
+      assert_equal :unknown_arm, bandit.reset(arm)
+      assert_equal :unknown_arm, bandit.decay(arm, ratio(1, 2))
+      assert_nil bandit.stats(arm)
+      assert_nil bandit.ucb1_index_q56(arm)
+    end
+    assert_equal [0, 1], [bandit.outstanding, bandit.next_serial]
+    assert_equal [0] * 16, 16.times.map { bandit.stats(it).generation }
   end
 
   def test_ucb1_sweeps_cold_arms_then_follows_the_index

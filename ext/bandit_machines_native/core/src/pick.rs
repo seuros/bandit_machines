@@ -59,15 +59,13 @@ pub fn best<S: Ord + Copy>(
         TieBreak::HighestIndex => last,
         TieBreak::LeastTried => fewest.map(|(_, index)| index),
         TieBreak::Draw => {
-            let mut skip = draw_below(pick, tied);
-            (0..arms).find(|index| {
-                let hit = candidate(*index).is_some_and(|entry| entry.score == top);
-                if hit && skip == 0 {
-                    return true;
-                }
-                skip -= u64::from(hit);
-                false
-            })
+            let Ok(skip) = usize::try_from(draw_below(pick, tied)) else {
+                debug_assert!(false, "a draw below the tied count fits usize");
+                return None;
+            };
+            (0..arms)
+                .filter(|index| candidate(*index).is_some_and(|entry| entry.score == top))
+                .nth(skip)
         }
     }
 }

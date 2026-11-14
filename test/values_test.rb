@@ -1,0 +1,126 @@
+# frozen_string_literal: true
+require_relative 'support'
+
+# Values built by hand are held to the rules of the ones the gem returns, and
+# a selection that cannot be built afterwards loses no work.
+class ValuesTest < Minitest::Test
+  include BanditSupport
+
+  def test_a_hand_built_selection_is_checked
+    selection = build.select_ucb1(0)
+    copy = BanditMachines::Selection.new(selection.ticket, :explore)
+    assert_equal [selection.ticket, :explore, selection.arm], [copy.ticket, copy.reason, copy.arm]
+    assert_equal selection, BanditMachines::Selection.new(selection.ticket, selection.reason)
+    assert_raises(TypeError) { BanditMachines::Selection.new(0, :explore) }
+    assert_raises(TypeError) { BanditMachines::Selection.new(selection.ticket, 'explore') }
+    assert_raises(RangeError) { BanditMachines::Selection.new(selection.ticket, :hunch) }
+  end
+
+  def test_a_hand_built_arm_stats_is_checked
+    stats = build.stats(0)
+    assert_equal stats, BanditMachines::ArmStats.new(true, 0, 0, 0, 0)
+    assert_equal [MAX, MAX], [BanditMachines::ArmStats.new(false, MAX, MAX, MAX, MAX).tries, MAX]
+    assert_raises(TypeError) { BanditMachines::ArmStats.new(nil, 0, 0, 0, 0) }
+    assert_raises(TypeError) { BanditMachines::ArmStats.new(1, 0, 0, 0, 0) }
+    assert_raises(TypeError) { BanditMachines::ArmStats.new(true, 0.0, 0, 0, 0) }
+    assert_raises(RangeError) { BanditMachines::ArmStats.new(true, 0, -1, 0, 0) }
+    assert_raises(RangeError) { BanditMachines::ArmStats.new(true, 0, 0, 2**64, 0) }
+    assert_raises(RangeError) { BanditMachines::ArmStats.new(true, 0, 0, 0, -1) }
+  end
+
+  # The classes are resolved once, at init: removing a constant later changes
+  # nothing the binding builds or reads.
+  def test_the_classes_are_resolved_once_at_init
+    bandit = build
+    selection = BanditMachines.send(:remove_const, :Selection)
+    begin
+      assert_equal 'BanditMachines::Selection', bandit.select_ucb1(0).class.name
+    ensure
+      BanditMachines.const_set(:Selection, selection)
+    end
+  end
+
+  # Sealing stops accidents, not reflection: Ruby binds a named subclass's
+  # constant before `inherited` raises, so the class leaks. Both forms raise.
+  def test_values_are_sealed_and_a_named_subclass_leaks_its_constant
+    [BanditMachines::Config, BanditMachines::Ratio, BanditMachines::Draws, BanditMachines::Selection,
+     BanditMachines::ArmStats].each do |value|
+      assert_raises(TypeError) { Class.new(value) }
+      assert_raises(NoMethodError) { value.allocate }
+    end
+    assert_raises(TypeError) do
+      self.class.module_eval('class LeakedRatio < BanditMachines::Ratio; end', __FILE__, __LINE__)
+    end
+    assert self.class.const_defined?(:LeakedRatio, false), 'the constant is bound before inherited raises'
+  end
+
+  # A forged value never reaches the core: a leaked subclass's instance is a
+  # TypeError, a Marshal frame edited past the check a RangeError, and neither
+  # earns a refusal symbol.
+  def test_a_forged_value_is_refused_at_the_boundary
+    assert_raises(TypeError) do
+      self.class.module_eval('class ForgedDraws < BanditMachines::Draws; end', __FILE__, __LINE__)
+    end
+    ForgedDraws.class_eval { def initialize(**fields) = Data.instance_method(:initialize).bind_call(self, **fields) }
+    bandit = build
+    forged = ForgedDraws.new(gate: 0, pick: 0)
+    assert_raises(TypeError) { bandit.select_epsilon_greedy(ratio(1, 2), forged) }
+    edited = Marshal.load(Marshal.dump(ratio(1, 2)).sub("i\x06".b, "i\x0C".b))
+    assert_equal [7, 2], [edited.numerator, edited.denominator]
+    assert_raises(RangeError) { bandit.select_epsilon_greedy(edited, draws(0, 0)) }
+    assert_raises(RangeError) { bandit.decay(0, edited) }
+    assert_equal [0, 0], [bandit.outstanding, bandit.issued]
+  end
+
+  # The classes are pinned at init, so a compaction moves none of them: every
+  # path that builds or reads a value still works after it.
+  def test_every_value_path_survives_gc_compact
+    skip 'GC.compact is not available' unless GC.respond_to?(:compact)
+    GC.compact
+    bandit = build
+    chosen = bandit.select_ucb1(0)
+    assert_instance_of BanditMachines::Selection, chosen
+    assert_instance_of BanditMachines::Selection, bandit.select_epsilon_greedy(ratio(1, 2), draws(0, 0))
+    assert_instance_of BanditMachines::ArmStats, bandit.stats(0)
+    assert_instance_of BanditMachines::Config, bandit.config
+    assert_equal :rewarded, bandit.reward(chosen.ticket, 1)
+    assert_equal BanditMachines::Ratio::ONE, ratio(1, 1)
+  end
+
+  # A selection whose build freezes or re-enters the bandit is not applied.
+  # The binding builds the Selection without running Ruby code, so neither
+  # can happen through `new`; a frozen bandit raises before anything moves.
+  def test_a_frozen_bandit_refuses_every_mutating_call
+    bandit = build
+    ticket = bandit.select_ucb1(0).ticket
+    bandit.freeze
+    [-> { bandit.select_ucb1(0) }, -> { bandit.select_epsilon_greedy(ratio(1, 2), draws(0, 0)) },
+     -> { bandit.reward(ticket, 1) }, -> { bandit.abandon(ticket) }, -> { bandit.revoke_before(1) },
+     -> { bandit.revoke_all }, -> { bandit.reset(0) }, -> { bandit.reset_all }, -> { bandit.decay(0, ratio(1, 2)) },
+     -> { bandit.decay_all(ratio(1, 2)) }, -> { bandit.open(1) }, -> { bandit.close(0) }].each do |call|
+      assert_raises(FrozenError) { call.call }
+    end
+    assert_equal 1, bandit.outstanding
+  end
+
+  # After the core issued a ticket the binding builds the Selection natively:
+  # no Ruby `initialize` runs, so one that raises cannot lose the ticket.
+  def test_a_selection_is_built_without_running_ruby
+    bandit = build
+    selection_class = BanditMachines::Selection
+    selection_class.alias_method(:__checked_initialize, :initialize)
+    selection_class.define_method(:initialize) { |*| raise 'never runs' }
+    begin
+      chosen = bandit.select_ucb1(0)
+      explored = bandit.select_epsilon_greedy(ratio(1, 1), draws(0, 0))
+    ensure
+      selection_class.alias_method(:initialize, :__checked_initialize)
+      selection_class.remove_method(:__checked_initialize)
+    end
+    assert_equal [[0, :cold_start, 1], [1, :cold_start, 2]],
+                 [chosen, explored].map { [it.arm, it.reason, it.ticket.serial] }
+    assert_predicate chosen, :frozen?
+    assert_equal chosen, BanditMachines::Selection.new(chosen.ticket, :cold_start)
+    assert_equal 2, bandit.outstanding
+  end
+end

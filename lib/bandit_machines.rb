@@ -33,13 +33,24 @@ module BanditMachines
     end
   end
 
-  # A selected arm's ticket and the rule that picked it.
+  # A selected arm's ticket and the rule that picked it: `ticket` a Ticket,
+  # `reason` one of :cold_start, :explore, :exploit, :upper_bound.
   Selection = Data.define(:ticket, :reason) do
+    def initialize(ticket:, reason:)
+      super
+      __validate
+    end
+
     def arm = ticket.arm
   end
 
-  # Snapshot of one arm.
+  # Snapshot of one arm: `open` true or false, every count in 0..2**64-1.
   ArmStats = Data.define(:open, :generation, :rewarded, :reward_sum, :pending) do
+    def initialize(open:, generation:, rewarded:, reward_sum:, pending:)
+      super
+      __validate
+    end
+
     def tries = [rewarded + pending, (2**64) - 1].min
   end
 end
@@ -47,3 +58,17 @@ end
 # Native is required: no algorithm fallback. It adds the checks to the values
 # above, so they must exist first.
 require 'bandit_machines_native/bandit_machines_native'
+
+module BanditMachines
+  # The values are sealed. `initialize` is where each validates, and a
+  # subclass could override it, or `allocate` build an instance that never ran
+  # it: subclassing raises TypeError and `allocate` is gone. Sealing stops
+  # accidents, not reflection (a named subclass's constant is bound before
+  # `inherited` raises; `Marshal.load` skips `initialize`), so the native side
+  # is the authority: a value it reads must be exactly its class, and every
+  # field is converted again through the core's constructors.
+  [Config, Ratio, Draws, Selection, ArmStats].each do |value|
+    value.singleton_class.undef_method(:allocate)
+    value.define_singleton_method(:inherited) { |_| raise TypeError, "#{value} cannot be subclassed" }
+  end
+end

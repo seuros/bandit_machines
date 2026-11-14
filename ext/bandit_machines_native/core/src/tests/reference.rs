@@ -89,6 +89,17 @@ impl Run {
         self.issued.push((selection.ticket, ticket));
     }
 
+    /// Whether the model refuses this selection; if so the core refused the
+    /// same way and changed nothing.
+    fn refused(&self, outcome: Result<Selection, Refusal>, before: &Bandit<ARMS, TICKETS>) -> bool {
+        let Some(refusal) = self.model.select_refusal() else {
+            return false;
+        };
+        assert_eq!(outcome, Err(refusal));
+        assert_eq!(&self.core, before);
+        true
+    }
+
     fn select_epsilon_greedy(&mut self) {
         let denominator = 1 + self.rng.below(8) as u32;
         let numerator = self.rng.below(u64::from(denominator) + 1) as u32;
@@ -99,9 +110,7 @@ impl Run {
         };
         let before = self.core.clone();
         let outcome = self.core.select_epsilon_greedy(epsilon, draws);
-        if let Some(refusal) = self.model.select_refusal() {
-            assert_eq!(outcome, Err(refusal));
-            assert_eq!(self.core, before);
+        if self.refused(outcome, &before) {
             return;
         }
         let (arm, reason) = if let Some(arm) = self.model.cold(draws.pick) {
@@ -118,9 +127,7 @@ impl Run {
         let pick = self.rng.next();
         let before = self.core.clone();
         let outcome = self.core.select_ucb1(pick);
-        if let Some(refusal) = self.model.select_refusal() {
-            assert_eq!(outcome, Err(refusal));
-            assert_eq!(self.core, before);
+        if self.refused(outcome, &before) {
             return;
         }
         if let Some(arm) = self.model.cold(pick) {

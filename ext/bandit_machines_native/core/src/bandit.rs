@@ -10,16 +10,9 @@ use crate::{
     ArmStats, Closing, Config, Draws, Opening, Ratio, Reason, Refusal, Selection, Ticket, TieBreak,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Arm {
-    open: bool,
-    generation: u64,
-    rewarded: u64,
-    reward_sum: u64,
-    pending: u64,
-}
-
-impl Arm {
+/// One arm's state is exactly the snapshot [`Bandit::stats`] hands out.
+impl ArmStats {
+    /// A closed arm with nothing observed, generation zero.
     const NEW: Self = Self {
         open: false,
         generation: 0,
@@ -28,8 +21,14 @@ impl Arm {
         pending: 0,
     };
 
-    const fn tries(&self) -> u64 {
-        self.rewarded.saturating_add(self.pending)
+    /// The arm after a reset: eligibility kept, everything else new, one
+    /// generation on.
+    fn forgotten(self) -> Result<Self, Refusal> {
+        Ok(Self {
+            open: self.open,
+            generation: self.generation.checked_add(1).ok_or(Refusal::Exhausted)?,
+            ..Self::NEW
+        })
     }
 }
 
@@ -75,11 +74,10 @@ impl Eq for Mean {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bandit<const ARMS: usize, const TICKETS: usize> {
     pub(crate) config: Config,
-    arms: [Arm; ARMS],
+    arms: [ArmStats; ARMS],
     tickets: [Option<Pending>; TICKETS],
     /// Issues ticket serials; never reissues one.
     issuer: Issuer,
-    outstanding: usize,
 }
 
 impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
@@ -132,10 +130,9 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
     const fn build(config: Config, issuer: Issuer) -> Self {
         Self {
             config,
-            arms: [Arm::NEW; ARMS],
+            arms: [ArmStats::NEW; ARMS],
             tickets: [None; TICKETS],
             issuer,
-            outstanding: 0,
         }
     }
 
@@ -161,7 +158,16 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
     /// Tickets issued and not yet rewarded, abandoned, revoked or voided.
     #[must_use]
     pub const fn outstanding(&self) -> usize {
-        self.outstanding
+        // Counted, not kept: a separate counter would be one more invariant.
+        let mut count = 0;
+        let mut rest = self.tickets.as_slice();
+        while let [slot, tail @ ..] = rest {
+            if slot.is_some() {
+                count += 1;
+            }
+            rest = tail;
+        }
+        count
     }
 
     /// Serial the next ticket will carry; every issued serial is below it.
@@ -177,13 +183,7 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
     /// Snapshot of one arm, or `None` past the compiled capacity.
     #[must_use]
     pub fn stats(&self, arm: usize) -> Option<ArmStats> {
-        self.arms.get(arm).map(|arm| ArmStats {
-            open: arm.open,
-            generation: arm.generation,
-            rewarded: arm.rewarded,
-            reward_sum: arm.reward_sum,
-            pending: arm.pending,
-        })
+        self.arms.get(arm).copied()
     }
 
     /// Make an arm eligible for selection.
@@ -232,7 +232,7 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
         } else {
             let total = self.total_tries();
             let rule = self.config.tie_break;
-            let arm = self.choose(rule, pick, |index| self.ucb1_index(index, total));
+            let arm = self.choose(rule, pick, |index, _| self.ucb1_index(index, total));
             (arm.ok_or(Refusal::NoOpenArm)?, Reason::UpperBound)
         };
         self.issue(slot, arm, reason)
@@ -258,10 +258,12 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
         let (arm, reason) = if let Some(arm) = self.cold(draws.pick) {
             (Some(arm), Reason::ColdStart)
         } else if explore {
-            let arm = self.choose(TieBreak::Draw, draws.pick, |_| Some(()));
+            let arm = self.choose(TieBreak::Draw, draws.pick, |_, _| Some(()));
             (arm, Reason::Explore)
         } else {
-            let arm = self.choose(self.config.tie_break, draws.pick, |index| self.mean(index));
+            let arm = self.choose(self.config.tie_break, draws.pick, |_, arm| {
+                Some(self.mean(arm))
+            });
             (arm, Reason::Exploit)
         };
         self.issue(slot, arm.ok_or(Refusal::NoOpenArm)?, reason)
@@ -286,22 +288,7 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
     /// [`Refusal::RewardOutOfRange`] or [`Refusal::Saturated`] leave the
     /// ticket outstanding so it can be redeemed again.
     pub fn reward(&mut self, ticket: Ticket, reward: u32) -> Result<(), Refusal> {
-        self.check(ticket)?;
-        if reward > self.config.max_reward {
-            return Err(Refusal::RewardOutOfRange);
-        }
-        let arm = &mut self.arms[ticket.arm];
-        let rewarded = arm.rewarded.checked_add(1).ok_or(Refusal::Saturated)?;
-        let reward_sum = arm
-            .reward_sum
-            .checked_add(u64::from(reward))
-            .ok_or(Refusal::Saturated)?;
-        arm.rewarded = rewarded;
-        arm.reward_sum = reward_sum;
-        arm.pending -= 1;
-        self.tickets[ticket.slot] = None;
-        self.outstanding -= 1;
-        Ok(())
+        self.redeem(ticket, Some(reward))
     }
 
     /// Give a ticket back without a reward: the selection never happened.
@@ -310,11 +297,7 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
     /// [`Refusal::UnknownTicket`] or [`Refusal::StaleTicket`], as for
     /// [`reward`](Self::reward).
     pub fn abandon(&mut self, ticket: Ticket) -> Result<(), Refusal> {
-        self.check(ticket)?;
-        self.arms[ticket.arm].pending -= 1;
-        self.tickets[ticket.slot] = None;
-        self.outstanding -= 1;
-        Ok(())
+        self.redeem(ticket, None)
     }
 
     /// Abandon every outstanding ticket whose serial is below `serial`.
@@ -354,14 +337,10 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
     /// [`Refusal::UnknownArm`], or [`Refusal::Exhausted`] when the arm has no
     /// generation left.
     pub fn reset(&mut self, arm: usize) -> Result<usize, Refusal> {
-        let state = self.arms.get_mut(arm).ok_or(Refusal::UnknownArm)?;
-        let generation = state.generation.checked_add(1).ok_or(Refusal::Exhausted)?;
-        *state = Arm {
-            open: state.open,
-            generation,
-            ..Arm::NEW
-        };
-        Ok(self.void(|pending| pending.arm == arm))
+        let mut arms = self.arms;
+        let state = arms.get_mut(arm).ok_or(Refusal::UnknownArm)?;
+        *state = state.forgotten()?;
+        Ok(self.replace(arms, |pending| pending.arm == arm))
     }
 
     /// [`reset`](Self::reset) every arm, or none of them.
@@ -369,17 +348,11 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
     /// # Errors
     /// [`Refusal::Exhausted`] when any arm has no generation left.
     pub fn reset_all(&mut self) -> Result<usize, Refusal> {
-        if self.arms.iter().any(|arm| arm.generation == u64::MAX) {
-            return Err(Refusal::Exhausted);
+        let mut arms = self.arms;
+        for arm in &mut arms {
+            *arm = arm.forgotten()?;
         }
-        for arm in &mut self.arms {
-            *arm = Arm {
-                open: arm.open,
-                generation: arm.generation + 1,
-                ..Arm::NEW
-            };
-        }
-        Ok(self.void(|_| true))
+        Ok(self.replace(arms, |_| true))
     }
 
     /// Discount one arm's history by `keep`: the reward count becomes
@@ -417,22 +390,25 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
         }
     }
 
-    /// The serial is issued first and is the only step that can refuse, so a
+    /// The serial is issued last, after every lookup that could fail, so a
     /// refused selection spends no serial and changes nothing.
-    const fn issue(
-        &mut self,
-        slot: usize,
-        arm: usize,
-        reason: Reason,
-    ) -> Result<Selection, Refusal> {
+    fn issue(&mut self, slot: usize, arm: usize, reason: Reason) -> Result<Selection, Refusal> {
+        let Some(free) = self.tickets.get_mut(slot).filter(|free| free.is_none()) else {
+            debug_assert!(false, "admit answers a free slot below TICKETS");
+            return Err(Refusal::TicketsFull);
+        };
+        let Some(state) = self.arms.get_mut(arm) else {
+            debug_assert!(false, "choose answers an arm below ARMS");
+            return Err(Refusal::NoOpenArm);
+        };
+        // An arm holds at most TICKETS outstanding tickets, so this never saturates.
+        let pending = state.pending.saturating_add(1);
         let serial = match self.issuer.issue() {
             Ok(serial) => serial,
             Err(periscope_machines::Refusal::Exhausted) => return Err(Refusal::Exhausted),
         };
-        self.tickets[slot] = Some(Pending { arm, serial });
-        self.outstanding += 1;
-        let state = &mut self.arms[arm];
-        state.pending += 1;
+        *free = Some(Pending { arm, serial });
+        state.pending = pending;
         Ok(Selection {
             ticket: Ticket {
                 slot,
@@ -445,23 +421,63 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
     }
 
     /// Origin first: a ticket this bandit's issuer never handed out names
-    /// nothing here, whatever slot, arm and generation it carries.
-    fn check(&self, ticket: Ticket) -> Result<(), Refusal> {
+    /// nothing here, whatever slot, arm and generation it carries. Then the
+    /// arm's generation, the slot, and only then the reward; every lookup is
+    /// checked, and nothing is written until all of them passed.
+    fn redeem(&mut self, ticket: Ticket, reward: Option<u32>) -> Result<(), Refusal> {
         if !self.issuer.owns(ticket.serial) {
             return Err(Refusal::UnknownTicket);
         }
-        let arm = self.arms.get(ticket.arm).ok_or(Refusal::UnknownTicket)?;
+        let arm = self
+            .arms
+            .get_mut(ticket.arm)
+            .ok_or(Refusal::UnknownTicket)?;
         if arm.generation != ticket.generation {
             return Err(Refusal::StaleTicket);
         }
-        let expected = Pending {
+        let expected = Some(Pending {
             arm: ticket.arm,
             serial: ticket.serial,
+        });
+        let slot = self.tickets.get_mut(ticket.slot);
+        let slot = slot
+            .filter(|slot| **slot == expected)
+            .ok_or(Refusal::UnknownTicket)?;
+        let (rewarded, reward_sum) = match reward {
+            None => (arm.rewarded, arm.reward_sum),
+            Some(reward) if reward > self.config.max_reward => {
+                return Err(Refusal::RewardOutOfRange);
+            }
+            Some(reward) => (
+                arm.rewarded.checked_add(1).ok_or(Refusal::Saturated)?,
+                arm.reward_sum
+                    .checked_add(u64::from(reward))
+                    .ok_or(Refusal::Saturated)?,
+            ),
         };
-        match self.tickets.get(ticket.slot) {
-            Some(Some(pending)) if *pending == expected => Ok(()),
-            Some(Some(_) | None) | None => Err(Refusal::UnknownTicket),
-        }
+        let Some(pending) = arm.pending.checked_sub(1) else {
+            debug_assert!(
+                false,
+                "an outstanding ticket is counted in its arm's pending"
+            );
+            return Err(Refusal::UnknownTicket);
+        };
+        *arm = ArmStats {
+            rewarded,
+            reward_sum,
+            pending,
+            ..*arm
+        };
+        *slot = None;
+        Ok(())
+    }
+
+    /// Void the doomed tickets, then install `arms`, the reset arms computed
+    /// (and checked) before anything changed.
+    fn replace(&mut self, arms: [ArmStats; ARMS], doomed: impl Fn(&Pending) -> bool) -> usize {
+        let voided = self.void(doomed);
+        self.arms = arms;
+        voided
     }
 
     fn void(&mut self, doomed: impl Fn(&Pending) -> bool) -> usize {
@@ -470,12 +486,17 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
             let Some(pending) = slot.filter(|pending| doomed(pending)) else {
                 continue;
             };
-            let arm = &mut self.arms[pending.arm];
-            arm.pending = arm.pending.saturating_sub(1);
+            // Voiding cannot refuse, so a broken invariant still frees the slot.
+            if let Some(arm) = self.arms.get_mut(pending.arm)
+                && let Some(left) = arm.pending.checked_sub(1)
+            {
+                arm.pending = left;
+            } else {
+                debug_assert!(false, "a pending ticket names an arm counting it");
+            }
             *slot = None;
             voided += 1;
         }
-        self.outstanding -= voided;
         voided
     }
 
@@ -490,12 +511,12 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
         &self,
         rule: TieBreak,
         pick: u64,
-        score: impl Fn(usize) -> Option<S>,
+        score: impl Fn(usize, &ArmStats) -> Option<S>,
     ) -> Option<usize> {
         best(ARMS, rule, pick, |index| {
             let arm = self.arms.get(index).filter(|arm| arm.open)?;
             Some(Candidate {
-                score: score(index)?,
+                score: score(index, arm)?,
                 tries: arm.tries(),
             })
         })
@@ -503,14 +524,13 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
 
     /// An open arm nobody has tried, if there is one.
     fn cold(&self, pick: u64) -> Option<usize> {
-        self.choose(self.config.tie_break, pick, |index| {
-            (self.arms[index].tries() == 0).then_some(())
+        self.choose(self.config.tie_break, pick, |_, arm| {
+            (arm.tries() == 0).then_some(())
         })
     }
 
-    fn mean(&self, arm: usize) -> Option<Mean> {
-        let arm = self.arms.get(arm)?;
-        Some(if arm.rewarded == 0 {
+    fn mean(&self, arm: &ArmStats) -> Mean {
+        if arm.rewarded == 0 {
             Mean {
                 sum: u64::from(self.config.prior),
                 count: 1,
@@ -520,7 +540,7 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
                 sum: arm.reward_sum,
                 count: arm.rewarded,
             }
-        })
+        }
     }
 
     fn ucb1_index(&self, arm: usize, total: u64) -> Option<u64> {
@@ -528,13 +548,13 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
         if state.tries() == 0 {
             return None;
         }
-        let mean = self.mean(arm)?;
+        let mean = self.mean(state);
         let mean = mean_q56(mean.sum, mean.count, self.config.max_reward);
         Some(mean + bonus_q56(total, state.tries()))
     }
 }
 
-fn discount(arm: &mut Arm, keep: Ratio) {
+fn discount(arm: &mut ArmStats, keep: Ratio) {
     let numerator = u128::from(keep.numerator());
     let denominator = u128::from(keep.denominator());
     let rewarded = (u128::from(arm.rewarded) * numerator).div_ceil(denominator);

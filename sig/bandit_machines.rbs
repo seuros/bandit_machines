@@ -1,7 +1,5 @@
 module BanditMachines
   VERSION: String
-  ARM_CAPACITY: Integer
-  TICKET_CAPACITY: Integer
 
   type tie_break = :lowest_index | :highest_index | :least_tried | :draw
   type reason = :cold_start | :explore | :exploit | :upper_bound
@@ -12,7 +10,8 @@ module BanditMachines
                | :reward_out_of_range | :saturated
 
   # `0 < max_reward`, `prior <= max_reward`, both in 0..2**32-1; anything else
-  # raises TypeError or RangeError, an unknown tie_break ArgumentError.
+  # raises TypeError or RangeError, and so does an unknown tie_break
+  # (TypeError for a non-Symbol, RangeError for an unknown Symbol).
   class Config < Data
     attr_reader max_reward: Integer
     attr_reader prior: Integer
@@ -51,6 +50,8 @@ module BanditMachines
     def scope: () -> Integer
   end
 
+  # `ticket` a Ticket and `reason` a Symbol (TypeError otherwise); an unknown
+  # reason Symbol raises RangeError.
   class Selection < Data
     attr_reader ticket: Ticket
     attr_reader reason: reason
@@ -59,6 +60,8 @@ module BanditMachines
     def arm: () -> Integer
   end
 
+  # `open` true or false (TypeError otherwise), every count an Integer
+  # (TypeError otherwise) in 0..2**64-1 (RangeError otherwise).
   class ArmStats < Data
     attr_reader open: bool
     attr_reader generation: Integer
@@ -81,9 +84,13 @@ module BanditMachines
   end
 
   # An arm index is any Integer in 0..2**64-1. One that names no arm
-  # (ARM_CAPACITY or above) is answered, not raised: :unknown_arm from the
+  # (Bandit::ARMS or above) is answered, not raised: :unknown_arm from the
   # mutating methods, nil from `stats` and `ucb1_index_q56`.
   class Bandit
+    # The core's `Bandit::ARMS`: compiled number of arms.
+    ARMS: Integer
+    # The core's `Bandit::TICKETS`: compiled number of outstanding tickets.
+    TICKETS: Integer
     # Scope zero.
     def self.new: (Config config) -> Bandit
     # `scope` is an Integer in 0..65535: TypeError otherwise, RangeError
@@ -131,7 +138,5 @@ module BanditMachines
     def decay: (Integer arm, Ratio keep) -> (:decayed | :unknown_arm)
     # Always honoured.
     def decay_all: (Ratio keep) -> :decayed
-    def arm_capacity: () -> Integer
-    def ticket_capacity: () -> Integer
   end
 end

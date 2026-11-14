@@ -3,11 +3,7 @@
 use super::*;
 
 fn scoped_bandit<const A: usize, const T: usize>(scope: u16) -> Bandit<A, T> {
-    let mut bandit = Bandit::with_scope(Config::new(10, 5, LOW).unwrap(), scope);
-    for arm in 0..A {
-        assert_eq!(bandit.open(arm), Ok(Opening::Opened));
-    }
-    bandit
+    opened(Bandit::with_scope(config(LOW), scope))
 }
 
 /// The independent review's sequence: two bandits with identical config, the
@@ -56,19 +52,8 @@ fn a_ticket_from_another_scope_is_refused_and_changes_nothing() {
 /// Scopes are the caller's: the core reads no clock and no random source, so
 /// two bandits left in one scope issue the same tickets and still alias.
 #[test]
-fn two_bandits_left_in_the_same_scope_still_alias() {
-    let mut a = open_bandit::<1, 1>(LOW);
-    let mut b = open_bandit::<1, 1>(LOW);
-    let from_a = a.select_ucb1(0).unwrap().ticket;
-    let from_b = b.select_ucb1(0).unwrap().ticket;
-    assert_eq!(from_a, from_b);
-    assert_eq!(b.reward(from_a, 1), Ok(()));
-    assert_eq!(b.outstanding(), 0);
-}
-
-#[test]
 fn new_is_scope_zero_and_serials_count_from_one() {
-    let config = Config::new(10, 5, LOW).unwrap();
+    let config = config(LOW);
     assert_eq!(Bandit::<2, 2>::new(config), Bandit::with_scope(config, 0));
     assert_eq!(
         Bandit::<2, 2>::resumed(config, 7, 0),
@@ -90,6 +75,11 @@ fn new_is_scope_zero_and_serials_count_from_one() {
     assert_eq!(scoped_one.next_serial(), Some(scoped(7, 1)));
     let ticket = scoped_one.select_ucb1(0).unwrap().ticket;
     assert_eq!((ticket.serial(), ticket.scope()), (scoped(7, 1), 7));
+
+    let mut twin = open_bandit::<2, 2>(LOW);
+    let from_twin = twin.select_ucb1(0).unwrap().ticket;
+    assert_eq!(from_twin, first);
+    assert_eq!(plain.reward(from_twin, 1), Ok(()));
 }
 
 #[test]
@@ -120,14 +110,23 @@ fn the_last_serial_of_a_scope_is_issued_and_then_selection_is_exhausted() {
     let before = bandit.clone();
     assert_eq!(bandit.next_serial(), None);
     assert_eq!(bandit.select_ucb1(0), Err(Refusal::Exhausted));
-    let draws = Draws { gate: 0, pick: 0 };
     assert_eq!(
-        bandit.select_epsilon_greedy(Ratio::ONE, draws),
+        bandit.select_epsilon_greedy(Ratio::ONE, draws(0, 0)),
         Err(Refusal::Exhausted)
     );
     assert_eq!(bandit, before);
     // The spent ticket stays unknown: its serial is never reissued.
     assert_eq!(bandit.reward(last, 1), Err(Refusal::UnknownTicket));
+
+    // Resumed spent, it stays spent; past the last sequence is not a state.
+    let mut spent = resumed_bandit::<1, 1>(3, SEQUENCE_MAX);
+    assert_eq!((spent.scope(), spent.issued()), (3, SEQUENCE_MAX));
+    let before = spent.clone();
+    assert_eq!(spent.select_ucb1(0), Err(Refusal::Exhausted));
+    assert_eq!(spent, before);
+    let config = spent.config();
+    assert_eq!(Bandit::<1, 1>::resumed(config, 3, SEQUENCE_MAX + 1), None);
+    assert_eq!(Bandit::<1, 1>::resumed(config, 3, u64::MAX), None);
 }
 
 /// The old idiom `revoke_before(u64::MAX)` names another scope's serial, and
@@ -206,17 +205,4 @@ fn a_resumed_bandit_continues_its_scope_and_refuses_every_earlier_ticket() {
     assert_eq!(bandit.reward(pending[0], 1), Err(Refusal::StaleTicket));
     assert_eq!(bandit, before);
     assert_eq!(bandit.outstanding(), 1);
-}
-
-#[test]
-fn a_bandit_resumed_at_the_last_sequence_is_spent_and_one_past_it_is_none() {
-    let mut spent = resumed_bandit::<1, 1>(3, SEQUENCE_MAX);
-    assert_eq!((spent.scope(), spent.issued()), (3, SEQUENCE_MAX));
-    assert_eq!(spent.next_serial(), None);
-    let before = spent.clone();
-    assert_eq!(spent.select_ucb1(0), Err(Refusal::Exhausted));
-    assert_eq!(spent, before);
-    let config = spent.config();
-    assert_eq!(Bandit::<1, 1>::resumed(config, 3, SEQUENCE_MAX + 1), None);
-    assert_eq!(Bandit::<1, 1>::resumed(config, 3, u64::MAX), None);
 }

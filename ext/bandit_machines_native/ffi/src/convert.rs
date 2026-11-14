@@ -3,7 +3,14 @@
 use bandit_machines::{
     ArmStats, Closing, Config, Draws, Opening, Ratio, Reason, Refusal, TieBreak,
 };
-use magnus::{Error, Integer, RClass, RModule, Ruby, Symbol, TryConvert, Value, prelude::*};
+use std::sync::OnceLock;
+
+use magnus::rb_sys::AsRawValue;
+use magnus::value::Opaque;
+use magnus::{
+    Error, Integer, IntoValue, RClass, RModule, RStruct, Ruby, Symbol, TryConvert, Value,
+    prelude::*,
+};
 
 fn integer(value: Value) -> Result<(), Error> {
     if Integer::from_value(value).is_some() {
@@ -60,31 +67,111 @@ impl TryConvert for Arm {
     }
 }
 
-/// A value object class defined on the Ruby side with `Data.define`.
-pub fn data_class(ruby: &Ruby, name: &str) -> Result<RClass, Error> {
-    ruby.class_object()
-        .const_get::<_, RModule>("BanditMachines")?
-        .const_get(name)
+/// The classes, in [`Classes`] field order. `Ticket` is defined by `init`
+/// before it resolves them; the rest by `lib/bandit_machines.rb`.
+const NAMES: [&str; 6] = [
+    "Config",
+    "Ratio",
+    "Draws",
+    "Selection",
+    "ArmStats",
+    "Ticket",
+];
+
+static CLASSES: OnceLock<[Opaque<RClass>; 6]> = OnceLock::new();
+
+/// Every class the binding builds or checks, as resolved at init.
+#[derive(Clone, Copy)]
+pub struct Classes {
+    pub config: RClass,
+    pub ratio: RClass,
+    pub draws: RClass,
+    pub selection: RClass,
+    pub arm_stats: RClass,
+    pub ticket: RClass,
 }
 
-fn data<A: magnus::ArgList>(ruby: &Ruby, name: &str, fields: A) -> Result<Value, Error> {
-    data_class(ruby, name)?.funcall("new", fields)
+/// Resolves and pins every class, once.
+pub fn resolve(ruby: &Ruby, module: RModule) -> Result<(), Error> {
+    let class = |name: &str| {
+        let class: RClass = module.const_get(name)?;
+        // Held in a static, so pinned: `GC.compact` must not move it.
+        ruby.gc_register_mark_object(class);
+        Ok::<_, Error>(Opaque::from(class))
+    };
+    let resolved = [
+        class(NAMES[0])?,
+        class(NAMES[1])?,
+        class(NAMES[2])?,
+        class(NAMES[3])?,
+        class(NAMES[4])?,
+        class(NAMES[5])?,
+    ];
+    // A second load keeps the first classes: they are the same constants.
+    let _ = CLASSES.get_or_init(|| resolved);
+    Ok(())
 }
 
-/// Insist that `value` is the `Data` class `name`, so its readers are the
-/// validated fields.
-fn expect(ruby: &Ruby, value: Value, name: &str, message: &'static str) -> Result<(), Error> {
-    if value.is_kind_of(data_class(ruby, name)?) {
-        return Ok(());
+pub fn classes(ruby: &Ruby) -> Result<Classes, Error> {
+    let held = CLASSES.get().ok_or_else(|| {
+        Error::new(
+            ruby.exception_load_error(),
+            "the bandit_machines extension is not initialised",
+        )
+    })?;
+    let [config, ratio, draws, selection, arm_stats, ticket] =
+        held.map(|class| ruby.get_inner(class));
+    Ok(Classes {
+        config,
+        ratio,
+        draws,
+        selection,
+        arm_stats,
+        ticket,
+    })
+}
+
+/// Build one of the gem's `Data` values natively from what the core answered:
+/// allocate, fill the members by position, freeze. That is all
+/// `Data#initialize` does past the check, and the core's own answers need no
+/// check, so no Ruby code runs.
+pub fn build<const N: usize>(class: RClass, members: [Value; N]) -> Result<Value, Error> {
+    let instance = RStruct::try_convert(class.obj_alloc()?)?;
+    for (index, member) in members.into_iter().enumerate() {
+        instance.aset(index, member)?;
     }
-    Err(Error::new(ruby.exception_type_error(), message))
+    instance.freeze();
+    Ok(instance.as_value())
+}
+
+/// The members of `value`, which must be an instance of exactly `class`: the
+/// classes compared by identity, which no Ruby method can fake (a subclass's
+/// constant leaks past the seal). Read straight from the struct, so no reader
+/// runs; `Marshal.load` skips `initialize`, so every caller converts each
+/// member again through the core's types.
+fn members<const N: usize>(
+    ruby: &Ruby,
+    value: Value,
+    class: RClass,
+    message: &'static str,
+) -> Result<[Value; N], Error> {
+    if value.class().as_raw() != class.as_raw() {
+        return Err(Error::new(ruby.exception_type_error(), message));
+    }
+    let fields = RStruct::try_convert(value)?;
+    let mut members = [value; N];
+    for (index, member) in members.iter_mut().enumerate() {
+        *member = fields.aref(index)?;
+    }
+    Ok(members)
 }
 
 pub fn ratio(ruby: &Ruby, value: Value) -> Result<Ratio, Error> {
-    expect(ruby, value, "Ratio", "expected a BanditMachines::Ratio")?;
-    let (numerator, denominator): (Small, Small) = (
-        value.funcall("numerator", ())?,
-        value.funcall("denominator", ())?,
+    let class = classes(ruby)?.ratio;
+    let [numerator, denominator] = members(ruby, value, class, "expected a BanditMachines::Ratio")?;
+    let (numerator, denominator) = (
+        Small::try_convert(numerator)?,
+        Small::try_convert(denominator)?,
     );
     Ratio::new(numerator.0, denominator.0).ok_or_else(|| {
         Error::new(
@@ -95,12 +182,14 @@ pub fn ratio(ruby: &Ruby, value: Value) -> Result<Ratio, Error> {
 }
 
 pub fn ratio_value(ruby: &Ruby, ratio: Ratio) -> Result<Value, Error> {
-    data(ruby, "Ratio", (ratio.numerator(), ratio.denominator()))
+    let members = [ratio.numerator(), ratio.denominator()].map(|term| term.into_value_with(ruby));
+    build(classes(ruby)?.ratio, members)
 }
 
 pub fn draws(ruby: &Ruby, value: Value) -> Result<Draws, Error> {
-    expect(ruby, value, "Draws", "expected a BanditMachines::Draws")?;
-    let (gate, pick): (Number, Number) = (value.funcall("gate", ())?, value.funcall("pick", ())?);
+    let class = classes(ruby)?.draws;
+    let [gate, pick] = members(ruby, value, class, "expected a BanditMachines::Draws")?;
+    let (gate, pick) = (Number::try_convert(gate)?, Number::try_convert(pick)?);
     Ok(Draws {
         gate: gate.0,
         pick: pick.0,
@@ -108,18 +197,55 @@ pub fn draws(ruby: &Ruby, value: Value) -> Result<Draws, Error> {
 }
 
 fn tie_break(ruby: &Ruby, value: Value) -> Result<TieBreak, Error> {
+    variant(
+        ruby,
+        value,
+        RULES,
+        tie_break_name,
+        Choices {
+            not_symbol: "tie_break must be a Symbol",
+            unknown: "tie_break must be :lowest_index, :highest_index, :least_tried or :draw",
+        },
+    )
+}
+
+/// Every `TieBreak`, in declaration order, for parsing a `tie_break` Symbol.
+const RULES: [TieBreak; 4] = [
+    TieBreak::LowestIndex,
+    TieBreak::HighestIndex,
+    TieBreak::LeastTried,
+    TieBreak::Draw,
+];
+
+/// Every `Reason`, in declaration order, for parsing a `reason` Symbol.
+const REASONS: [Reason; 4] = [
+    Reason::ColdStart,
+    Reason::Explore,
+    Reason::Exploit,
+    Reason::UpperBound,
+];
+
+/// What to say when a Symbol field is not a Symbol, or names no variant.
+#[derive(Clone, Copy)]
+struct Choices {
+    not_symbol: &'static str,
+    unknown: &'static str,
+}
+
+/// The variant among `all` whose snake-case `name` is the Symbol `value`.
+fn variant<T: Copy, const N: usize>(
+    ruby: &Ruby,
+    value: Value,
+    all: [T; N],
+    name: fn(T) -> &'static str,
+    choices: Choices,
+) -> Result<T, Error> {
     let symbol = Symbol::from_value(value)
-        .ok_or_else(|| Error::new(ruby.exception_type_error(), "tie_break must be a Symbol"))?;
-    match symbol.name()?.as_ref() {
-        "lowest_index" => Ok(TieBreak::LowestIndex),
-        "highest_index" => Ok(TieBreak::HighestIndex),
-        "least_tried" => Ok(TieBreak::LeastTried),
-        "draw" => Ok(TieBreak::Draw),
-        _ => Err(Error::new(
-            ruby.exception_arg_error(),
-            "tie_break must be :lowest_index, :highest_index, :least_tried or :draw",
-        )),
-    }
+        .ok_or_else(|| Error::new(ruby.exception_type_error(), choices.not_symbol))?;
+    let given = symbol.name()?;
+    all.into_iter()
+        .find(|candidate| name(*candidate) == given.as_ref())
+        .ok_or_else(|| Error::new(ruby.exception_range_error(), choices.unknown))
 }
 
 const fn tie_break_name(rule: TieBreak) -> &'static str {
@@ -132,12 +258,11 @@ const fn tie_break_name(rule: TieBreak) -> &'static str {
 }
 
 pub fn config(ruby: &Ruby, value: Value) -> Result<Config, Error> {
-    expect(ruby, value, "Config", "expected a BanditMachines::Config")?;
-    let (max_reward, prior): (Small, Small) = (
-        value.funcall("max_reward", ())?,
-        value.funcall("prior", ())?,
-    );
-    let rule = tie_break(ruby, value.funcall("tie_break", ())?)?;
+    let class = classes(ruby)?.config;
+    let [max_reward, prior, rule] =
+        members(ruby, value, class, "expected a BanditMachines::Config")?;
+    let (max_reward, prior) = (Small::try_convert(max_reward)?, Small::try_convert(prior)?);
+    let rule = tie_break(ruby, rule)?;
     Config::new(max_reward.0, prior.0, rule).ok_or_else(|| {
         Error::new(
             ruby.exception_range_error(),
@@ -147,33 +272,80 @@ pub fn config(ruby: &Ruby, value: Value) -> Result<Config, Error> {
 }
 
 pub fn config_value(ruby: &Ruby, config: Config) -> Result<Value, Error> {
-    data(
-        ruby,
-        "Config",
-        (
-            config.max_reward(),
-            config.prior(),
-            ruby.to_symbol(tie_break_name(config.tie_break())),
-        ),
+    build(
+        classes(ruby)?.config,
+        [
+            config.max_reward().into_value_with(ruby),
+            config.prior().into_value_with(ruby),
+            ruby.to_symbol(tie_break_name(config.tie_break()))
+                .as_value(),
+        ],
     )
 }
 
 pub fn stats_value(ruby: &Ruby, stats: ArmStats) -> Result<Value, Error> {
-    data(
-        ruby,
-        "ArmStats",
-        (
-            stats.open,
-            stats.generation,
-            stats.rewarded,
-            stats.reward_sum,
-            stats.pending,
-        ),
+    build(
+        classes(ruby)?.arm_stats,
+        [
+            stats.open.into_value_with(ruby),
+            stats.generation.into_value_with(ruby),
+            stats.rewarded.into_value_with(ruby),
+            stats.reward_sum.into_value_with(ruby),
+            stats.pending.into_value_with(ruby),
+        ],
     )
 }
 
-pub fn selection_value(ruby: &Ruby, ticket: Value, why: Reason) -> Result<Value, Error> {
-    data(ruby, "Selection", (ticket, ruby.to_symbol(reason(why))))
+/// Build a `Selection` natively, with the class resolved at init: nothing
+/// after the core's answer runs Ruby code.
+pub fn selection_value(
+    ruby: &Ruby,
+    class: RClass,
+    ticket: Value,
+    why: Reason,
+) -> Result<Value, Error> {
+    build(class, [ticket, ruby.to_symbol(reason(why)).as_value()])
+}
+
+/// Check a hand-built `Selection`: the ticket a `Ticket`, the reason one of
+/// the core's variants. Every such pair is a selection the core could answer.
+pub fn selection(ruby: &Ruby, value: Value) -> Result<(), Error> {
+    let known = classes(ruby)?;
+    let [ticket, why] = members(
+        ruby,
+        value,
+        known.selection,
+        "expected a BanditMachines::Selection",
+    )?;
+    if ticket.class().as_raw() != known.ticket.as_raw() {
+        return Err(Error::new(
+            ruby.exception_type_error(),
+            "ticket must be a BanditMachines::Ticket",
+        ));
+    }
+    let choices = Choices {
+        not_symbol: "reason must be a Symbol",
+        unknown: "reason must be :cold_start, :explore, :exploit or :upper_bound",
+    };
+    variant(ruby, why, REASONS, reason, choices).map(|_| ())
+}
+
+/// Check a hand-built `ArmStats`: `open` a boolean, every count an unsigned
+/// 64-bit Integer. The core's snapshot has no further invariant.
+pub fn arm_stats(ruby: &Ruby, value: Value) -> Result<(), Error> {
+    let class = classes(ruby)?.arm_stats;
+    let [open, counts @ ..] =
+        members::<5>(ruby, value, class, "expected a BanditMachines::ArmStats")?;
+    if !(open.is_kind_of(ruby.class_true_class()) || open.is_kind_of(ruby.class_false_class())) {
+        return Err(Error::new(
+            ruby.exception_type_error(),
+            "open must be true or false",
+        ));
+    }
+    for count in counts {
+        Number::try_convert(count)?;
+    }
+    Ok(())
 }
 
 const fn reason(reason: Reason) -> &'static str {
