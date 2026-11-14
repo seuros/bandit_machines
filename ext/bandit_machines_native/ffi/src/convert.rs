@@ -10,7 +10,7 @@ use magnus::{
 
 use crate::Handle;
 use matryona_machines::ruby::{
-    Class, Registry, Symbols, boolean, exact_fields, exact_typed, integer,
+    Class, Registry, Symbols, boolean, exact_fields, exact_typed_with, integer,
 };
 
 /// Every class the binding builds or checks, as resolved at init.
@@ -208,15 +208,15 @@ pub fn arm_stats(ruby: &Ruby, value: Value) -> Result<(), Error> {
 }
 
 /// The ticket `value` wraps: exactly a `BanditMachines::Ticket`, a subclass
-/// instance refused with `TypeError`.
+/// instance refused with `TypeError` naming the class received.
 pub fn ticket(ruby: &Ruby, value: Value) -> Result<Obj<Handle>, Error> {
     let class = classes(ruby)?.ticket.get(ruby);
-    exact_typed(
-        ruby,
-        value,
-        class,
-        "ticket must be a BanditMachines::Ticket",
-    )
+    exact_typed_with(ruby, value, class, || {
+        format!(
+            "ticket must be a BanditMachines::Ticket, not {}",
+            value.class()
+        )
+    })
 }
 
 pub const fn opening(opening: Opening) -> &'static str {

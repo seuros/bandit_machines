@@ -145,13 +145,13 @@ class ValuesTest < Minitest::Test
 
   # A Ticket is read as exactly a Ticket. A subclass has no instance (the
   # allocator is gone and only a bandit issues tickets), and anything else is
-  # a TypeError naming the Ticket.
+  # a TypeError naming the Ticket and the class received.
   def test_a_ticket_is_read_as_exactly_a_ticket
     bandit = build
     assert_raises(TypeError) { Class.new(BanditMachines::Ticket).allocate }
-    [-> { bandit.reward(bandit, 1) }, -> { bandit.abandon(Object.new) },
-     -> { BanditMachines::Selection.new(bandit, :explore) }].each do |call|
-      assert_equal 'ticket must be a BanditMachines::Ticket', assert_raises(TypeError, &call).message
+    { -> { bandit.reward(bandit, 1) } => 'BanditMachines::Bandit', -> { bandit.abandon(Object.new) } => 'Object',
+      -> { BanditMachines::Selection.new(bandit, :explore) } => 'BanditMachines::Bandit' }.each do |call, received|
+      assert_equal "ticket must be a BanditMachines::Ticket, not #{received}", assert_raises(TypeError, &call).message
     end
   end
 
