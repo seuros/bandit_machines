@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.6.0...bandit_machines/v0.6.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** require matryona-machines &gt;= 0.3 and read ArmStats#open with boolean ([7ece99c](https://github.com/seuros/bandit_machines/commit/7ece99c07c8c12177a121209d3696a3642ed68cf))
+
 ## [0.6.0](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.5.0...bandit_machines/v0.6.0) (2026-11-14)
 
 
