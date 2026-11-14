@@ -9,7 +9,9 @@ use magnus::{
 };
 
 use crate::Handle;
-use matryona_machines::ruby::{Class, Registry, Symbols, exact_fields, exact_typed, integer};
+use matryona_machines::ruby::{
+    Class, Registry, Symbols, boolean, exact_fields, exact_typed, integer,
+};
 
 /// Every class the binding builds or checks, as resolved at init.
 pub struct Classes {
@@ -197,12 +199,7 @@ pub fn arm_stats(ruby: &Ruby, value: Value) -> Result<(), Error> {
     let class = classes(ruby)?.arm_stats;
     let [open, counts @ ..] =
         members::<5>(ruby, value, class, "expected a BanditMachines::ArmStats")?;
-    if !(open.is_kind_of(ruby.class_true_class()) || open.is_kind_of(ruby.class_false_class())) {
-        return Err(Error::new(
-            ruby.exception_type_error(),
-            "open must be true or false",
-        ));
-    }
+    boolean(open, "open")?;
     let names = ["generation", "rewarded", "reward_sum", "pending"];
     for (count, name) in counts.into_iter().zip(names) {
         integer::<u64>(count, name)?;
