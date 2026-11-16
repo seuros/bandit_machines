@@ -4,7 +4,7 @@ use magnus::{Error, Ruby, Value, function, method, prelude::*};
 
 use crate::convert;
 use crate::{Bandit, Engine, Handle};
-use matryona_machines::ruby::integer;
+use matryona_machines::ruby::{Class, integer};
 
 fn validate_config(ruby: &Ruby, this: Value) -> Result<(), Error> {
     convert::config(ruby, this).map(|_| ())
@@ -123,5 +123,6 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("reset_all", method!(Bandit::reset_all, 0))?;
     class.define_method("decay", method!(Bandit::decay, 2))?;
     class.define_method("decay_all", method!(Bandit::decay_all, 1))?;
-    Ok(())
+    // `new` answers a Bandit: its class is fixed now, like the ticket's.
+    Class::pin_wrapped::<Bandit>(ruby, class).map(drop)
 }

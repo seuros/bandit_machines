@@ -29,7 +29,8 @@ matryona_machines::registry! {
 }
 
 /// Resolves and pins every class, once: `ticket`, which `init` defined, as
-/// given, with no lookup back by name; the rest, which
+/// given, with no lookup back by name, fixing magnus's class for `Handle` to
+/// it (no ticket conversion runs `Object.const_get` later); the rest, which
 /// `lib/bandit_machines.rb` defined, by name.
 pub fn resolve(ruby: &Ruby, module: RModule, ticket: RClass) -> Result<(), Error> {
     let class = |name| Class::resolve(ruby, module, name);
@@ -39,7 +40,7 @@ pub fn resolve(ruby: &Ruby, module: RModule, ticket: RClass) -> Result<(), Error
         draws: class("Draws")?,
         selection: class("Selection")?,
         arm_stats: class("ArmStats")?,
-        ticket: Class::pin(ruby, ticket),
+        ticket: Class::pin_wrapped::<Handle>(ruby, ticket)?,
     };
     CLASSES.set(ruby, classes).map(drop)
 }
