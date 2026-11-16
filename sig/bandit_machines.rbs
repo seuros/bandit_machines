@@ -18,6 +18,9 @@ module BanditMachines
     attr_reader tie_break: tie_break
     def self.new: (Integer max_reward, Integer prior, tie_break tie_break) -> Config
                 | (max_reward: Integer, prior: Integer, tie_break: tie_break) -> Config
+    # Native: re-checks every field through the core constructor; raises
+    # TypeError or RangeError, nil when valid.
+    private def __validate: () -> nil
   end
 
   # `numerator <= denominator`, `denominator > 0`, both in 0..2**32-1.
@@ -28,6 +31,9 @@ module BanditMachines
     attr_reader denominator: Integer
     def self.new: (Integer numerator, Integer denominator) -> Ratio
                 | (numerator: Integer, denominator: Integer) -> Ratio
+    # Native: re-checks every field through the core constructor; raises
+    # TypeError or RangeError, nil when valid.
+    private def __validate: () -> nil
   end
 
   # Two uniform draws, each in 0..2**64-1.
@@ -36,6 +42,9 @@ module BanditMachines
     attr_reader pick: Integer
     def self.new: (Integer gate, Integer pick) -> Draws
                 | (gate: Integer, pick: Integer) -> Draws
+    # Native: re-checks every field through the core constructor; raises
+    # TypeError or RangeError, nil when valid.
+    private def __validate: () -> nil
   end
 
   # Mirrors the core's `Ticket`. Opaque; it cannot be built or copied by hand.
@@ -58,6 +67,9 @@ module BanditMachines
     def self.new: (Ticket ticket, reason reason) -> Selection
                 | (ticket: Ticket, reason: reason) -> Selection
     def arm: () -> Integer
+    # Native: re-checks every field through the core constructor; raises
+    # TypeError or RangeError, nil when valid.
+    private def __validate: () -> nil
   end
 
   # `open` true or false (TypeError otherwise), every count an Integer
@@ -71,6 +83,9 @@ module BanditMachines
     def self.new: (bool open, Integer generation, Integer rewarded, Integer reward_sum, Integer pending) -> ArmStats
                 | (open: bool, generation: Integer, rewarded: Integer, reward_sum: Integer, pending: Integer) -> ArmStats
     def tries: () -> Integer
+    # Native: re-checks every field through the core constructor; raises
+    # TypeError or RangeError, nil when valid.
+    private def __validate: () -> nil
   end
 
   # The core's `math` module: unsigned Q8.56 fixed point, integers in and out.

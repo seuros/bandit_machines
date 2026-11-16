@@ -40,6 +40,7 @@ pub const fn ln_q56(value: u64) -> u64 {
 #[allow(clippy::cast_possible_truncation)] // Every narrowed value is below 2^64.
 pub const fn bonus_q56(total: u64, tries: u64) -> u64 {
     let tries = if tries == 0 { 1 } else { tries };
+    // ln(2^64) < 45, so ln_q56 < 45 * 2^56 < 2^62 and doubling it fits.
     let radicand = (2 * ln_q56(total)) / tries;
     ((radicand as u128) << FRACTION_BITS).isqrt() as u64
 }

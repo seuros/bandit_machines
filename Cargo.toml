@@ -10,9 +10,9 @@ license = "MIT"
 
 [workspace.dependencies]
 bandit-machines = { path = "ext/bandit_machines_native/core" }
-sliderule-machines = ">=0.2"
-periscope-machines = ">=0.4"
-matryona-machines = { version = ">=0.4", default-features = false }
+sliderule-machines = ">=0.3"
+periscope-machines = ">=0.5"
+matryona-machines = { version = ">=0.5", default-features = false }
 magnus = { version = "0.9.3", default-features = false }
 rb-sys = { version = "0.9.130", default-features = false, features = ["stable-api-compiled-fallback"] }
 

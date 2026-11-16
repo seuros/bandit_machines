@@ -550,6 +550,7 @@ impl<const ARMS: usize, const TICKETS: usize> Bandit<ARMS, TICKETS> {
         }
         let mean = self.mean(state);
         let mean = mean_q56(mean.sum, mean.count, self.config.max_reward);
+        // mean <= 2^56 and the bonus is below 2^60 (radicand < 2^63), so no wrap.
         Some(mean + bonus_q56(total, state.tries()))
     }
 }

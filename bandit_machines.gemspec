@@ -6,8 +6,8 @@ Gem::Specification.new do |spec|
   spec.version = BanditMachines::VERSION
   spec.authors = ['Abdelkader Boudih']
   spec.email = ['oss@seuros.com']
-  spec.summary = 'Initial bounded multi-armed bandit policies with a native Rust core'
-  spec.description = 'Unstable UCB1 and epsilon-greedy selection with ticketed rewards; not an experiment platform.'
+  spec.summary = 'Bounded multi-armed bandit policies with a native Rust core'
+  spec.description = 'UCB1 and epsilon-greedy arm selection with ticketed rewards; not an experiment platform.'
   spec.homepage = 'https://github.com/seuros/bandit_machines'
   spec.license = 'MIT'
   spec.required_ruby_version = '>= 4.0.0'

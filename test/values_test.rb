@@ -150,7 +150,8 @@ class ValuesTest < Minitest::Test
     bandit = build
     assert_raises(TypeError) { Class.new(BanditMachines::Ticket).allocate }
     { -> { bandit.reward(bandit, 1) } => 'BanditMachines::Bandit', -> { bandit.abandon(Object.new) } => 'Object',
-      -> { BanditMachines::Selection.new(bandit, :explore) } => 'BanditMachines::Bandit' }.each do |call, received|
+      -> { BanditMachines::Selection.new(bandit, :explore) } => 'BanditMachines::Bandit',
+      -> { bandit.abandon(Object.new.tap { |o| def o.opened = true }) } => 'Object' }.each do |call, received|
       assert_equal "ticket must be a BanditMachines::Ticket, not #{received}", assert_raises(TypeError, &call).message
     end
   end
@@ -165,15 +166,8 @@ class ValuesTest < Minitest::Test
   # no Ruby `initialize` runs, so one that raises cannot lose the ticket.
   def test_a_selection_is_built_without_running_ruby
     bandit = build
-    selection_class = BanditMachines::Selection
-    selection_class.alias_method(:__checked_initialize, :initialize)
-    selection_class.define_method(:initialize) { |*| raise 'never runs' }
-    begin
-      chosen = bandit.select_ucb1(0)
-      explored = bandit.select_epsilon_greedy(ratio(1, 1), draws(0, 0))
-    ensure
-      selection_class.alias_method(:initialize, :__checked_initialize)
-      selection_class.remove_method(:__checked_initialize)
+    chosen, explored = readers(BanditMachines::Selection, initialize: proc { |*| raise 'never runs' }) do
+      [bandit.select_ucb1(0), bandit.select_epsilon_greedy(ratio(1, 1), draws(0, 0))]
     end
     assert_equal [[0, :cold_start, 1], [1, :cold_start, 2]],
                  [chosen, explored].map { [it.arm, it.reason, it.ticket.serial] }
@@ -184,15 +178,26 @@ class ValuesTest < Minitest::Test
 
   private
 
-  # Runs the block with each reader of `value` redefined, then restores it.
+  # Runs the block with each method of `value` named in `bodies` replaced by
+  # its body, then restores the originals.
   def readers(value, **bodies)
-    bodies.each_key { |name| value.alias_method(:"__original_#{name}", name) }
-    bodies.each { |name, body| value.define_method(name, &body) }
+    originals = bodies.to_h { |name, _| [name, value.instance_method(name)] }
+    bodies.each { |name, body| replace_method(value, name, body) }
     yield
   ensure
-    bodies.each_key do |name|
-      value.alias_method(name, :"__original_#{name}")
-      value.remove_method(:"__original_#{name}")
-    end
+    originals&.each { |name, method| replace_method(value, name, (method if method.owner == value)) }
+  end
+
+  # Defines `name` on `klass` as `body` (removes it when `body` is nil),
+  # removing the method `klass` itself holds first. Ruby warns about the
+  # redefinition (and about removing `initialize`), deliberate here, so
+  # warnings are off for the swap alone.
+  def replace_method(klass, name, body)
+    verbose = $VERBOSE
+    $VERBOSE = nil
+    klass.remove_method(name) if klass.method_defined?(name, false) || klass.private_method_defined?(name, false)
+    klass.define_method(name, body) if body
+  ensure
+    $VERBOSE = verbose
   end
 end

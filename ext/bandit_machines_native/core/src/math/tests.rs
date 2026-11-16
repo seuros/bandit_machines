@@ -1,9 +1,8 @@
 #![allow(
-    clippy::unwrap_used,
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
-)] // Failed test assumptions should panic; the reference model is floating point.
+)] // The reference model is floating point.
 
 extern crate std;
 

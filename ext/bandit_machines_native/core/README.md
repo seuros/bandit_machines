@@ -11,7 +11,7 @@ UCB1 and epsilon-greedy. Rewards are integers in `0..=max_reward`. There is no
 generator inside: every random decision consumes a `u64` the caller supplies,
 so a run is replayable from its draws.
 
-Initial, unstable API. This is a policy core, not an experiment platform: it
+Pre-1.0: breaking changes land in minor versions. This is a policy core, not an experiment platform: it
 does not assign users, persist anything, or know what an arm means.
 
 ```rust

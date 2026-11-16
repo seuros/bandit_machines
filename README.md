@@ -4,7 +4,7 @@
 
 A multi-armed bandit for Ruby. You have a handful of options and no idea which pays best. Ask the bandit which to try, and it hands you an arm and a ticket. When you find out how it went, you hand the ticket back with a reward. It balances trying the arm that looks best against trying the ones it knows too little about, with UCB1 or epsilon-greedy, and it refuses a reward that shows up for an arm you've since reset.
 
-This is an initial, unstable API. It is a policy core, not an experiment platform: it picks arms and counts rewards, and everything else is yours.
+Pre-1.0: breaking changes land in minor versions. It is a policy core, not an experiment platform: it picks arms and counts rewards, and everything else is yours.
 
 ## Quick Start
 

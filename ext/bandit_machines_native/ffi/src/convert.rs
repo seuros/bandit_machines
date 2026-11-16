@@ -10,7 +10,7 @@ use magnus::{
 
 use crate::Handle;
 use matryona_machines::ruby::{
-    Class, Registry, Symbols, boolean, exact_fields, exact_typed_with, integer,
+    Class, Symbols, boolean, class_name, exact_fields, exact_typed_with, integer,
 };
 
 /// Every class the binding builds or checks, as resolved at init.
@@ -23,7 +23,10 @@ pub struct Classes {
     pub ticket: Class,
 }
 
-static CLASSES: Registry<Classes> = Registry::new("bandit_machines");
+matryona_machines::registry! {
+    static CLASSES: Classes = "bandit_machines";
+    pub fn classes;
+}
 
 /// Resolves and pins every class, once: `ticket`, which `init` defined, as
 /// given, with no lookup back by name; the rest, which
@@ -39,10 +42,6 @@ pub fn resolve(ruby: &Ruby, module: RModule, ticket: RClass) -> Result<(), Error
         ticket: Class::pin(ruby, ticket),
     };
     CLASSES.set(ruby, classes).map(drop)
-}
-
-pub fn classes(ruby: &Ruby) -> Result<&'static Classes, Error> {
-    CLASSES.get(ruby)
 }
 
 /// Build one of the gem's `Data` values natively from what the core answered:
@@ -214,7 +213,7 @@ pub fn ticket(ruby: &Ruby, value: Value) -> Result<Obj<Handle>, Error> {
     exact_typed_with(ruby, value, class, || {
         format!(
             "ticket must be a BanditMachines::Ticket, not {}",
-            value.class()
+            class_name(value)
         )
     })
 }
