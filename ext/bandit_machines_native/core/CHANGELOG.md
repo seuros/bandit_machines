@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/seuros/bandit_machines/compare/bandit-machines-v0.7.0...bandit-machines-v0.7.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* rebuild bandit on matryona 0.5 and drop core slice indexing ([2157556](https://github.com/seuros/bandit_machines/commit/2157556821757abf6e4fd400f7ad6e2807dfb992))
+
 ## [0.7.0](https://github.com/seuros/bandit_machines/compare/bandit-machines-v0.6.0...bandit-machines-v0.7.0) (2026-11-14)
 
 

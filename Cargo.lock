@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "bandit-machines"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "matryona-machines",
  "periscope-machines",
@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "bandit_machines_native"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bandit-machines",
  "magnus",
