@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.7.1...bandit_machines/v0.7.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* fix wrapped classes at load so building a value runs no Ruby ([0d4c834](https://github.com/seuros/bandit_machines/commit/0d4c8346efb6e3813c68fc89a553d1564ad9cc73))
+
 ## [0.7.1](https://github.com/seuros/bandit_machines/compare/bandit_machines/v0.7.0...bandit_machines/v0.7.1) (2026-11-16)
 
 
